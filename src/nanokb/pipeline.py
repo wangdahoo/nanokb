@@ -47,6 +47,11 @@ from pydantic import BaseModel, Field
 
 from nanokb.compile import GraphBuilder
 from nanokb.config import Settings
+from nanokb.config_signature import (
+    embedding_config_signature,
+    extraction_config_signature,
+    index_config_signature,
+)
 from nanokb.extract import build_default_extractor
 from nanokb.extract.base import Extractor
 from nanokb.index import VectorStore, build_indexes
@@ -373,6 +378,9 @@ def compile(  # noqa: A001  — 故意与内建同名，方案 §3.5.1 指定
             llm_model=settings.llm_model,
             embedding_model=settings.embedding_model,
             embedding_dim=actual_embedding_dim,
+            extraction_config=extraction_config_signature(settings),
+            index_config=index_config_signature(settings),
+            embedding_config=embedding_config_signature(settings),
         )
 
     # step 10-11: 序列化到 staging + 原子切换（manifest 最后写）
@@ -476,6 +484,9 @@ def replay(settings: Settings) -> ReplayResult:
             llm_model=settings.llm_model,
             embedding_model=settings.embedding_model,
             embedding_dim=existing.embedding_dim if existing else 0,
+            extraction_config=extraction_config_signature(settings),
+            index_config=index_config_signature(settings),
+            embedding_config=embedding_config_signature(settings),
         )
     for path in deleted_files:
         manifest.files.pop(path, None)
