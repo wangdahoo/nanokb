@@ -85,6 +85,44 @@ def test_factory_returns_three_distinct_provider_types() -> None:
     assert type(ollama_client) is not type(openai_client)
 
 
+# ── openai_base_url 透传（GLM/智谱等 OpenAI 兼容端点） ──────────
+
+
+def test_openai_client_custom_base_url() -> None:
+    client = OpenAIClient(
+        api_key="sk-fake",
+        model="glm-5.1",
+        embedding_model="embedding-3",
+        base_url="https://open.bigmodel.cn/api/paas/v4",
+    )
+    assert str(client._client.base_url).startswith("https://open.bigmodel.cn")
+
+
+def test_openai_client_default_base_url_when_unset() -> None:
+    client = OpenAIClient(api_key="sk-fake", model="gpt-4o-mini", embedding_model="x")
+    # 未指定 base_url → SDK 默认官方端点
+    assert "api.openai.com" in str(client._client.base_url)
+
+
+def test_factory_passes_base_url_to_openai() -> None:
+    settings = Settings(
+        llm_provider="openai",
+        openai_api_key="sk-fake",
+        llm_model="glm-5.1",
+        openai_base_url="https://open.bigmodel.cn/api/paas/v4",
+    )
+    client = make_llm_client(settings)
+    assert isinstance(client, OpenAIClient)
+    assert str(client._client.base_url).startswith("https://open.bigmodel.cn")
+
+
+def test_factory_default_base_url_when_setting_absent() -> None:
+    settings = Settings(llm_provider="openai", openai_api_key="sk-fake")
+    client = make_llm_client(settings)
+    assert isinstance(client, OpenAIClient)
+    assert "api.openai.com" in str(client._client.base_url)
+
+
 # ── API key 缺失 → exit code 2 ─────────────────────────────────
 
 

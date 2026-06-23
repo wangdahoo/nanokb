@@ -17,8 +17,19 @@ from nanokb.llm.base import ResponseFormat
 class OpenAIClient:
     """OpenAI provider 实现。"""
 
-    def __init__(self, api_key: str, model: str, embedding_model: str) -> None:
-        self._client = OpenAI(api_key=api_key)
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        embedding_model: str,
+        base_url: str | None = None,
+    ) -> None:
+        # 仅在显式指定 base_url 时透传，未指定时由 SDK 读 OPENAI_BASE_URL 环境变量或用默认端点
+        self._client = (
+            OpenAI(api_key=api_key, base_url=base_url)
+            if base_url
+            else OpenAI(api_key=api_key)
+        )
         self._model = model
         self._embedding_model = embedding_model
         # 懒加载：避免构造期触发 tiktoken BPE 文件下载（离线/无缓存环境下构造仍可用）

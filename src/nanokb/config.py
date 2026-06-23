@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     llm_provider: Literal["openai", "anthropic", "ollama"] = "openai"
     llm_model: str = "glm-5.1"
     openai_api_key: SecretStr | None = None
+    openai_base_url: str | None = None  # OpenAI 兼容端点（如智谱 GLM https://open.bigmodel.cn/api/paas/v4）
     anthropic_api_key: SecretStr | None = None
     ollama_base_url: str = "http://localhost:11434"
 

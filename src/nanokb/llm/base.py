@@ -119,6 +119,7 @@ def make_llm_client(settings: Settings) -> LLMClient:
             api_key=key.get_secret_value(),
             model=settings.llm_model,
             embedding_model=settings.embedding_model,
+            base_url=settings.openai_base_url,
         )
 
     if provider == "anthropic":
@@ -139,6 +140,7 @@ def make_llm_client(settings: Settings) -> LLMClient:
                 if settings.openai_api_key
                 else None
             ),
+            openai_base_url=settings.openai_base_url,
         )
 
     if provider == "ollama":

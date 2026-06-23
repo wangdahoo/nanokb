@@ -38,11 +38,13 @@ class AnthropicClient:
         model: str,
         embedding_model: str,
         openai_api_key: str | None = None,
+        openai_base_url: str | None = None,
     ) -> None:
         self._client = Anthropic(api_key=api_key)
         self._model = model
         self._embedding_model = embedding_model
         self._openai_api_key = openai_api_key
+        self._openai_base_url = openai_base_url
         # 懒加载：避免构造期触发 tiktoken BPE 文件下载
         self._encoding: tiktoken.Encoding | None = None
 
@@ -116,7 +118,11 @@ class AnthropicClient:
             raise RuntimeError(
                 "AnthropicClient.embed requires openai_api_key (Anthropic has no embeddings API)"
             )
-        client = OpenAI(api_key=self._openai_api_key)
+        client = (
+            OpenAI(api_key=self._openai_api_key, base_url=self._openai_base_url)
+            if self._openai_base_url
+            else OpenAI(api_key=self._openai_api_key)
+        )
         resp = client.embeddings.create(model=self._embedding_model, input=texts)
         return [item.embedding for item in resp.data]
 
