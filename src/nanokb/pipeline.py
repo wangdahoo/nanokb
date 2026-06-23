@@ -54,6 +54,7 @@ from nanokb.config_signature import (
 )
 from nanokb.extract import build_default_extractor
 from nanokb.extract.base import Extractor
+from nanokb.extract.cache import ExtractionCache
 from nanokb.index import VectorStore, build_indexes
 from nanokb.index.community import CommunityResult, load_communities
 from nanokb.llm.base import LLMClient, make_llm_client
@@ -122,6 +123,7 @@ class CompileResult(BaseModel):
     extracted_count: int = 0
     skipped: list[str] = Field(default_factory=list)
     synthesized_fallback_count: int = 0
+    cached_count: int = 0
 
 
 class ReplayResult(BaseModel):
@@ -261,6 +263,10 @@ def compile(  # noqa: A001  — 故意与内建同名，方案 §3.5.1 指定
     sha_map: dict[str, str] = {}
     skipped: list[str] = []
 
+    cache = ExtractionCache(settings.out_dir / "extract_cache")
+    extraction_sig = extraction_config_signature(settings)
+    cached_count = 0
+
     to_process = sorted(set(changes.added) | set(changes.modified))
     total = len(to_process)
     for idx, path in enumerate(to_process, 1):
@@ -286,23 +292,43 @@ def compile(  # noqa: A001  — 故意与内建同名，方案 §3.5.1 指定
             skipped.append(path)
             continue
 
-        try:
-            result = extractor.extract(doc)
-        except Exception:
-            logger.exception(
-                "extraction failed for %s", path,
+        cached = cache.get(doc.sha256, extraction_sig, settings.llm_model)
+        if cached is not None:
+            result = cached
+            cached_count += 1
+            logger.info(
+                "[%d/%d] cache hit %s → %d triples, %d concepts",
+                idx, total, path, len(result.triples), len(result.concepts),
                 extra={"stage": "compile-extract", "file": path},
             )
-            skipped.append(path)
-            continue
+        else:
+            try:
+                result = extractor.extract(doc)
+            except Exception:
+                logger.exception(
+                    "extraction failed for %s", path,
+                    extra={"stage": "compile-extract", "file": path},
+                )
+                skipped.append(path)
+                continue
+
+            try:
+                cache.put(doc.sha256, extraction_sig, settings.llm_model, result)
+            except Exception:
+                logger.warning(
+                    "cache put failed for %s; result kept in memory",
+                    path,
+                    extra={"stage": "compile-extract", "file": path},
+                )
+
+            logger.info(
+                "[%d/%d] extracted %s → %d triples, %d concepts",
+                idx, total, path, len(result.triples), len(result.concepts),
+                extra={"stage": "compile-extract", "file": path},
+            )
 
         results_map[path] = _normalize_result_source(result, path)
         sha_map[path] = doc.sha256
-        logger.info(
-            "[%d/%d] extracted %s → %d triples, %d concepts",
-            idx, total, path, len(result.triples), len(result.concepts),
-            extra={"stage": "compile-extract", "file": path},
-        )
 
     # ── 阶段 B：破坏性变更（抽取全部成功后统一执行） ──────────────────
 
@@ -408,6 +434,7 @@ def compile(  # noqa: A001  — 故意与内建同名，方案 §3.5.1 指定
         extracted_count=len(results_map),
         skipped=skipped,
         synthesized_fallback_count=fallback_count,
+        cached_count=cached_count,
     )
 
 
