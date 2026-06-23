@@ -1,0 +1,82 @@
+[project]
+name = "nanokb"
+version = "0.1.0"
+description = "Nano KB — 基于 LLM-as-Wiki 理念的极简个人知识库工具"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [{ name = "Nano KB" }]
+keywords = ["knowledge-base", "llm", "knowledge-graph", "rag"]
+dependencies = [
+    "chromadb>=0.5,<0.6",
+    "tree-sitter>=0.21",
+    "tree-sitter-languages>=1.10",
+    "unstructured>=0.13,<0.15",
+    "networkx>=3.2",
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    "typer>=0.12",
+    "rich>=13.7",
+    "watchdog>=4.0",
+    "igraph>=0.11",
+    "leidenalg>=0.10",
+    "openai>=1.30",
+    "anthropic>=0.30",
+    "tiktoken>=0.7",
+]
+
+[project.scripts]
+nanokb = "nanokb.cli:app"
+
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.4",
+    "mypy>=1.10",
+    "pytest>=8.2",
+    "pytest-mock>=3.14",
+    "respx>=0.21",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nanokb"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/nanokb", "README.md"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["B011"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["nanokb"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+warn_redundant_casts = true
+no_implicit_optional = true
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+markers = [
+    "llm: tests that call real LLM APIs (deselected by default in CI via -m 'not llm')",
+]
+addopts = "-ra"
+
+[tool.uv]
+default-groups = ["dev"]
