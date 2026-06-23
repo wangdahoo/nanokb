@@ -1,4 +1,4 @@
-"""代码轨端到端集成测试（方案 §3.5.1 + §4 阶段 4，Feature s1-feat-010 AC #5）。
+"""代码轨端到端集成测试（方案 §3.5.1 + §4 阶段 4，Feature s1-feat-010 AC #5 + s1-feat-008 缓存扩展）。
 
 覆盖：
 - AC #5：raw/ 下含 .py 文件，``nanokb build``（compile）端到端生成图谱，
@@ -8,6 +8,9 @@
 - 纯代码 build 不消耗 LLM chat Token（CodeTrack 零 Token）。
 - 代码 + 语义双轨融合：同一 build 内 .py 走 CodeTrack、.md 走 SemanticTrack。
 - 删除代码文件后图谱 calls/defines 边随之清理（deletion 传播对 code track 同样生效）。
+- 缓存/签名扩展（s1-feat-008）：.py 换 embedding_model 命中缓存（complete_calls 仍 0）；
+  禁 python（code_languages=["javascript"]）→ extraction_config 变 → miss → CodeTrack
+  重抽为空 → 该 .py 的 calls/defines 边消失。
 """
 
 from __future__ import annotations
@@ -57,23 +60,25 @@ def _settings(raw_dir: Path, out_dir: Path, **kwargs: Any) -> Settings:
 
 def _semantic_response() -> str:
     """语义轨对 .md 返回的抽取结果（Transformer → uses → Attention）。"""
-    return json.dumps({
-        "triples": [
-            {
-                "head": "Transformer",
-                "relation": "uses",
-                "tail": "Attention",
-                "confidence": "EXTRACTED",
-            },
-        ],
-        "concepts": [
-            {
-                "name": "Transformer",
-                "description": "A neural network architecture using attention.",
-                "node_type": "concept",
-            },
-        ],
-    })
+    return json.dumps(
+        {
+            "triples": [
+                {
+                    "head": "Transformer",
+                    "relation": "uses",
+                    "tail": "Attention",
+                    "confidence": "EXTRACTED",
+                },
+            ],
+            "concepts": [
+                {
+                    "name": "Transformer",
+                    "description": "A neural network architecture using attention.",
+                    "node_type": "concept",
+                },
+            ],
+        }
+    )
 
 
 # ── AC #5：raw/ 含 .py → build 生成含 calls/defines 边的图谱 ─────────
@@ -104,17 +109,13 @@ def test_build_with_py_generates_calls_and_defines_edges(tmp_path: Path) -> None
     graph_data = json.loads((out_dir / "graph.json").read_text(encoding="utf-8"))
     graph = nx.node_link_graph(graph_data, directed=True, multigraph=True)
 
-    relations = {
-        data.get("relation") for _, _, data in graph.edges(data=True)
-    }
+    relations = {data.get("relation") for _, _, data in graph.edges(data=True)}
     # 代码轨产出 calls 与 defines 两类关系边
     assert "calls" in relations
     assert "defines" in relations
 
     # 具体断言：(greet, calls, format_message) 与 (calc, defines, greet)
-    edge_set = {
-        (u, data.get("relation"), v) for u, v, data in graph.edges(data=True)
-    }
+    edge_set = {(u, data.get("relation"), v) for u, v, data in graph.edges(data=True)}
     assert ("greet", "calls", "format_message") in edge_set
     assert ("calc", "defines", "greet") in edge_set
     assert ("calc", "defines", "format_message") in edge_set
@@ -171,8 +172,7 @@ def test_dual_track_merges_code_and_semantic_results(tmp_path: Path) -> None:
     graph = nx.node_link_graph(graph_data, directed=True, multigraph=True)
 
     edge_set = {
-        (u, data.get("relation"), v, data.get("track"))
-        for u, v, data in graph.edges(data=True)
+        (u, data.get("relation"), v, data.get("track")) for u, v, data in graph.edges(data=True)
     }
     # 语义轨：Transformer uses Attention（track=semantic）
     assert ("Transformer", "uses", "Attention", "semantic") in edge_set
@@ -198,10 +198,7 @@ def test_deletion_propagates_to_code_track_edges(tmp_path: Path) -> None:
     pipeline.compile(settings, llm=llm)
     first_graph_data = json.loads((out_dir / "graph.json").read_text(encoding="utf-8"))
     first_graph = nx.node_link_graph(first_graph_data, directed=True, multigraph=True)
-    first_edges = {
-        (u, data.get("relation"), v)
-        for u, v, data in first_graph.edges(data=True)
-    }
+    first_edges = {(u, data.get("relation"), v) for u, v, data in first_graph.edges(data=True)}
     assert ("foo", "calls", "bar") in first_edges
 
     # 删除 mod.py 后重新 build
@@ -210,10 +207,7 @@ def test_deletion_propagates_to_code_track_edges(tmp_path: Path) -> None:
 
     second_graph_data = json.loads((out_dir / "graph.json").read_text(encoding="utf-8"))
     second_graph = nx.node_link_graph(second_graph_data, directed=True, multigraph=True)
-    second_edges = {
-        (u, data.get("relation"), v)
-        for u, v, data in second_graph.edges(data=True)
-    }
+    second_edges = {(u, data.get("relation"), v) for u, v, data in second_graph.edges(data=True)}
     assert ("foo", "calls", "bar") not in second_edges
 
 
@@ -239,3 +233,74 @@ def test_rebuild_idempotent_no_duplicate_code_edges(tmp_path: Path) -> None:
         if data.get("relation") == "calls" and u == "foo" and v == "bar"
     ]
     assert len(calls_edges) == 1  # 幂等：仅一条
+
+
+# ── Feature s1-feat-008 扩展：代码轨缓存/签名场景 ──────────────────────
+#
+# 端到端验证 CodeTrack 结果同样进入内容寻址缓存，且 code_languages 属于 extraction_config：
+# - .py 换 embedding_model → 缓存命中（key 不含 embedding），complete_calls 仍 0；
+# - 禁 python（code_languages=["javascript"]）→ extraction_config 变 → 缓存 miss →
+#   CodeTrack 对 .py 重抽返回空 → 该 .py 的 calls/defines 边消失。
+
+
+def test_py_change_embedding_model_cache_hit(tmp_path: Path) -> None:
+    """.py 换 embedding_model recompile：缓存命中（CodeTrack 结果也进缓存），complete_calls 仍 0。"""
+    raw_dir = tmp_path / "raw"
+    out_dir = tmp_path / "out"
+    raw_dir.mkdir()
+    (raw_dir / "mod.py").write_text(
+        "def foo():\n    bar()\n\ndef bar():\n    pass\n",
+        encoding="utf-8",
+    )
+
+    llm1 = FakeLLMClient()
+    settings1 = _settings(raw_dir, out_dir)
+    result1 = pipeline.compile(settings1, llm=llm1)
+    assert result1.cached_count == 0
+    assert llm1.complete_calls == 0  # CodeTrack 零 LLM
+
+    # 换 embedding_model → embedding_config 变 → modified → cache key 不含 embedding → 命中
+    llm2 = FakeLLMClient()
+    settings2 = _settings(raw_dir, out_dir, embedding_model="text-embedding-3-large")
+    result2 = pipeline.compile(settings2, llm=llm2)
+
+    assert result2.cached_count == 1
+    assert llm2.complete_calls == 0  # 仍零 LLM
+
+
+def test_disable_python_code_languages_reextracts_empty(tmp_path: Path) -> None:
+    """禁 python(code_languages=["javascript"])→extraction_config 变→miss→CodeTrack 重抽为空→calls/defines 边消失。"""
+    raw_dir = tmp_path / "raw"
+    out_dir = tmp_path / "out"
+    raw_dir.mkdir()
+    (raw_dir / "mod.py").write_text(
+        "def foo():\n    bar()\n\ndef bar():\n    pass\n",
+        encoding="utf-8",
+    )
+
+    llm1 = FakeLLMClient()
+    settings1 = _settings(raw_dir, out_dir)
+    pipeline.compile(settings1, llm=llm1)
+
+    # 首次：图谱含 foo calls bar 边
+    graph1_data = json.loads((out_dir / "graph.json").read_text(encoding="utf-8"))
+    graph1 = nx.node_link_graph(graph1_data, directed=True, multigraph=True)
+    first_edges = {(u, data.get("relation"), v) for u, v, data in graph1.edges(data=True)}
+    assert ("foo", "calls", "bar") in first_edges
+
+    # 禁 python：code_languages=["javascript"] → extraction_config 变 → cache miss
+    # CodeTrack 对 .py 返回空结果（python 未启用）→ calls/defines 边消失
+    llm2 = FakeLLMClient()
+    settings2 = _settings(raw_dir, out_dir, code_languages=["javascript"])
+    result2 = pipeline.compile(settings2, llm=llm2)
+
+    assert result2.cached_count == 0  # miss
+    assert llm2.complete_calls == 0  # CodeTrack 始终零 LLM
+
+    # 二次：foo calls bar 边消失，无任何 code 轨关系边
+    graph2_data = json.loads((out_dir / "graph.json").read_text(encoding="utf-8"))
+    graph2 = nx.node_link_graph(graph2_data, directed=True, multigraph=True)
+    second_edges = {(u, data.get("relation"), v) for u, v, data in graph2.edges(data=True)}
+    assert ("foo", "calls", "bar") not in second_edges
+    code_relations = {"calls", "defines", "contains"}
+    assert all(data.get("relation") not in code_relations for _, _, data in graph2.edges(data=True))
