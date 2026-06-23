@@ -46,7 +46,12 @@ from pydantic import BaseModel, Field
 
 from nanokb.config import Settings
 from nanokb.llm.base import LLMClient, make_llm_client
-from nanokb.loaders import LoaderRegistry, UnstructuredLoader, UnsupportedFormatError
+from nanokb.loaders import (
+    CodeLoader,
+    LoaderRegistry,
+    UnstructuredLoader,
+    UnsupportedFormatError,
+)
 from nanokb.models import (
     Answer,
     Concept,
@@ -62,8 +67,8 @@ from nanokb.stage1_load.detector import (
     detect_changes,
 )
 from nanokb.stage1_load.ingest import ingest_file
+from nanokb.stage2_extract import build_default_extractor
 from nanokb.stage2_extract.base import Extractor
-from nanokb.stage2_extract.semantic_track import SemanticTrack
 from nanokb.stage3_compile import GraphBuilder
 from nanokb.stage5_qa.generator import generate
 from nanokb.stage5_qa.prompt import compile_context
@@ -160,7 +165,8 @@ def compile(  # noqa: A001  — 故意与内建同名，方案 §3.5.1 指定
         llm: LLM 客户端；``None`` 时通过 ``make_llm_client(settings)`` 创建
             （缺 API key 会 exit 2）。
         registry: 文档加载注册表；``None`` 时用默认（UnstructuredLoader）。
-        extractor_factory: 自定义抽取器工厂；``None`` 时用 ``SemanticTrack``。
+        extractor_factory: 自定义抽取器工厂；``None`` 时用默认分发抽取器
+            （代码文件 → CodeTrack，其余 → SemanticTrack）。
         vector_store: 向量库后端；``None`` 时跳过向量操作（stage4 未实现阶段）。
         force: ``True`` 时忽略 manifest 全量重编译（空 manifest + 空图起步）。
 
@@ -198,7 +204,9 @@ def compile(  # noqa: A001  — 故意与内建同名，方案 §3.5.1 指定
     if extractor_factory is not None:
         extractor = extractor_factory(llm, settings)
     else:
-        extractor = SemanticTrack(llm, settings)
+        # 默认按扩展名分发：代码文件（.py/.js/.java）走 CodeTrack（零 Token），
+        # 其余走 SemanticTrack（LLM 抽取）。s1-feat-010。
+        extractor = build_default_extractor(llm, settings)
 
     results_map: dict[str, ExtractionResult] = {}
     sha_map: dict[str, str] = {}
@@ -472,12 +480,14 @@ def answer_query(
 
 
 def build_default_registry() -> LoaderRegistry:
-    """构造默认 LoaderRegistry（注册 UnstructuredLoader）。
+    """构造默认 LoaderRegistry：UnstructuredLoader + CodeLoader。
 
-    CodeLoader（.py/.js/.java）在 s1-feat-010 通过同一接口接入。
+    二者支持的扩展名集合互斥（md/txt/pdf/docx vs py/js/java），按注册顺序首个
+    ``supports`` 胜出，由各 loader 自行判定，无需额外优先级协调（s1-feat-010）。
     """
     registry = LoaderRegistry()
     registry.register(UnstructuredLoader())
+    registry.register(CodeLoader())
     return registry
 
 
