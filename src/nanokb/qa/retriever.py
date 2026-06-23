@@ -36,6 +36,11 @@ from nanokb.models import (
     RetrievalHit,
     Triple,
 )
+from nanokb.qa.progress import (
+    _SOURCE_LABELS,
+    NullProgressReporter,
+    ProgressReporter,
+)
 from nanokb.qa.prompt import render_hit
 
 if TYPE_CHECKING:
@@ -427,27 +432,37 @@ class MultiRetriever:
         retrievers: list[Retriever],
         settings: Settings,
         llm: LLMClient,
+        *,
+        progress: ProgressReporter | None = None,
     ) -> None:
         self._retrievers = list(retrievers)
         self._settings = settings
         self._llm = llm
+        self._progress: ProgressReporter = progress or NullProgressReporter()
 
     def recall(self, question: str) -> list[RetrievalHit]:
-        """依次调用各 retriever，合并 → fuse（去重 + confidence 权重排序 + 裁剪）。"""
+        """依次调用各 retriever，合并 → fuse（去重 + confidence 权重排序 + 裁剪）。
+
+        每路召回与 fuse 各自包进一个 ``progress.stage``，向 CLI 报告检索进度
+        （``progress=None`` 时为空实现，行为与无进度反馈一致）。
+        """
         all_hits: list[RetrievalHit] = []
         for retriever in self._retrievers:
-            try:
-                hits = retriever.recall(question)
-            except Exception:
-                logger.warning(
-                    "retriever %s failed; degrading to empty",
-                    type(retriever).__name__,
-                    exc_info=True,
-                    extra={"stage": "qa-retriever"},
-                )
-                hits = []
-            all_hits.extend(hits)
-        return fuse(all_hits, self._settings, self._llm)
+            label = _SOURCE_LABELS.get(retriever.SOURCE, retriever.SOURCE)
+            with self._progress.stage(f"{label}中..."):
+                try:
+                    hits = retriever.recall(question)
+                except Exception:
+                    logger.warning(
+                        "retriever %s failed; degrading to empty",
+                        type(retriever).__name__,
+                        exc_info=True,
+                        extra={"stage": "qa-retriever"},
+                    )
+                    hits = []
+                all_hits.extend(hits)
+        with self._progress.stage("融合重排中..."):
+            return fuse(all_hits, self._settings, self._llm)
 
 
 def fuse(

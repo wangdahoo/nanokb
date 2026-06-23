@@ -74,6 +74,10 @@ from nanokb.models import (
     Triple,
 )
 from nanokb.qa.generator import generate
+from nanokb.qa.progress import (
+    NullProgressReporter,
+    ProgressReporter,
+)
 from nanokb.qa.prompt import compile_context
 from nanokb.qa.retriever import (
     CommunityRetriever,
@@ -507,6 +511,7 @@ def answer_query(
     graph: nx.MultiDiGraph | None = None,
     vector_store: VectorStoreBackend | None = None,
     communities: CommunityResult | None = None,
+    progress: ProgressReporter | None = None,
 ) -> AnswerQueryResult:
     """执行问答流程（方案 §3.5.3，按 ``mode`` 启用 retriever 子集）。
 
@@ -534,6 +539,8 @@ def answer_query(
         graph: 已加载的图谱；``None`` 时从 ``out/graph.json`` 加载。
         vector_store: 向量库后端；``None`` 时按 mode 决定是否从 ``out/chroma`` 加载。
         communities: 社区结果；``None`` 时按 mode 决定是否从 ``out/communities.json`` 加载。
+        progress: 检索进度报告器；``None`` 时用空实现（无进度反馈）。CLI 注入基于
+            ``rich`` 的实现，在各阶段展示 spinner + 持久日志。
 
     Returns:
         ``AnswerQueryResult`` —— 答案 + 召回命中。
@@ -549,18 +556,23 @@ def answer_query(
         )
         raise ColdStartError("知识库未编译，请先运行 nanokb build")
 
-    if graph is None:
-        graph = _load_graph(settings.out_dir)
-    if llm is None:
-        llm = make_llm_client(settings)
+    progress_reporter: ProgressReporter = progress or NullProgressReporter()
 
-    retrievers = _build_retrievers_for_mode(
-        mode, graph, llm, settings, vector_store=vector_store, communities=communities
-    )
-    multi = MultiRetriever(retrievers, settings, llm)
+    with progress_reporter.stage("加载知识库..."):
+        if graph is None:
+            graph = _load_graph(settings.out_dir)
+        if llm is None:
+            llm = make_llm_client(settings)
+
+        retrievers = _build_retrievers_for_mode(
+            mode, graph, llm, settings, vector_store=vector_store, communities=communities
+        )
+    multi = MultiRetriever(retrievers, settings, llm, progress=progress_reporter)
     hits = multi.recall(question)
-    context = compile_context(hits, settings, llm)
-    answer = generate(question, context, hits, llm, settings)
+    with progress_reporter.stage("构建上下文..."):
+        context = compile_context(hits, settings, llm)
+    with progress_reporter.stage("生成答案中..."):
+        answer = generate(question, context, hits, llm, settings)
     # 方案 §阶段 5：generate 调用 should_flag 设置 review_flagged；命中则 append 到
     # review_queue.md（s1-feat-013 主动学习闭环）。
     if answer.review_flagged:
@@ -579,6 +591,7 @@ def search_communities(
     llm: LLMClient | None = None,
     graph: nx.MultiDiGraph | None = None,
     communities: CommunityResult | None = None,
+    progress: ProgressReporter | None = None,
 ) -> list[RetrievalHit]:
     """``search --community`` 社区宏观检索（方案 §3.5.3，s1-feat-012 AC #3）。
 
@@ -593,6 +606,7 @@ def search_communities(
         llm: LLM 客户端；``None`` 时经 ``make_llm_client`` 创建。
         graph: 已加载图谱；``None`` 时从 ``out/graph.json`` 加载。
         communities: 社区结果；``None`` 时从 ``out/communities.json`` 加载。
+        progress: 检索进度报告器；``None`` 时用空实现（无进度反馈）。
 
     Returns:
         命中的 ``RetrievalHit`` 列表（携带 ``community_summary``）；无命中返回空。
@@ -603,20 +617,24 @@ def search_communities(
     if _is_cold_start(settings):
         raise ColdStartError("知识库未编译，请先运行 nanokb build")
 
-    if communities is None:
-        communities = load_communities(settings.out_dir)
-    if communities is None or not communities.communities:
-        raise ColdStartError(
-            "社区索引未编译，请先运行 nanokb build 完成高级索引"
-        )
+    progress_reporter: ProgressReporter = progress or NullProgressReporter()
 
-    if graph is None:
-        graph = _load_graph(settings.out_dir)
-    if llm is None:
-        llm = make_llm_client(settings)
+    with progress_reporter.stage("加载社区索引..."):
+        if communities is None:
+            communities = load_communities(settings.out_dir)
+        if communities is None or not communities.communities:
+            raise ColdStartError(
+                "社区索引未编译，请先运行 nanokb build 完成高级索引"
+            )
 
-    retriever = CommunityRetriever(communities, graph, llm, settings)
-    return retriever.recall(keyword)
+        if graph is None:
+            graph = _load_graph(settings.out_dir)
+        if llm is None:
+            llm = make_llm_client(settings)
+
+    with progress_reporter.stage("社区召回中..."):
+        retriever = CommunityRetriever(communities, graph, llm, settings)
+        return retriever.recall(keyword)
 
 
 def _build_retrievers_for_mode(

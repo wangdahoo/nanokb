@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
 
 import typer
@@ -22,6 +23,8 @@ from nanokb.config import Settings
 from nanokb.llm.base import make_llm_client
 from nanokb.load.detector import start_watch
 from nanokb.logging_setup import setup_logging
+from nanokb.models import RetrievalHit
+from nanokb.qa.progress import _SOURCE_LABELS
 from nanokb.qa.review import ReviewQueue
 
 app = typer.Typer(
@@ -76,6 +79,59 @@ def _print_compile_summary(result: pipeline.CompileResult) -> None:
     if result.synthesized_fallback_count:
         parts.append(f"fallback={result.synthesized_fallback_count}")
     console.print(f"[green]编译完成：{', '.join(parts)}[/green]")
+
+
+class RichProgressReporter:
+    """基于 ``rich`` 的检索进度报告器（CLI 表现层）。
+
+    - **TTY**：阶段期间用 ``console.status`` 显示 spinner；退出时打印持久日志行
+      ``✓ {msg} ({elapsed}s)``，保留各阶段与耗时记录。
+    - **非 TTY**（测试 / 重定向 / 管道）：不转圈，仅打印 ``[dim]{msg}[/dim]`` 状态行，
+      保证输出可读且被 ``CliRunner`` 正常捕获。
+
+    实现 ``qa.progress.ProgressReporter`` 协议（结构化匹配，无需显式继承）。
+    """
+
+    def __init__(self, console: Console) -> None:
+        self._console = console
+
+    def stage(self, message: str) -> AbstractContextManager[None]:
+        return _rich_stage(self._console, message)
+
+
+@contextmanager
+def _rich_stage(console: Console, message: str) -> Iterator[None]:
+    """``RichProgressReporter.stage`` 的上下文实现（拆出以便用 ``@contextmanager``）。"""
+    if not console.is_terminal:
+        console.print(f"[dim]{message}[/dim]")
+        yield
+        return
+    start = time.monotonic()
+    with console.status(message, spinner="dots"):
+        yield
+    elapsed = time.monotonic() - start
+    console.print(f"[green]✓[/green] [dim]{message}[/dim] [dim]({elapsed:.1f}s)[/dim]")
+
+
+def _print_recall_summary(hits: list[RetrievalHit]) -> None:
+    """打印召回摘要行：``召回 N 条：图谱召回2 / 向量召回2 / 社区召回1``。
+
+    按 ``_SOURCE_LABELS`` 定义的检索顺序（图谱 → 向量 → 社区）排列，与实际召回流程一致。
+    """
+    if not hits:
+        console.print("[dim]召回 0 条[/dim]")
+        return
+    by_source: dict[str, int] = {}
+    for hit in hits:
+        by_source[hit.source] = by_source.get(hit.source, 0) + 1
+    # 按 _SOURCE_LABELS 定义的检索顺序输出；未知 source 追加在末尾（按出现序）
+    ordered: list[str] = []
+    for src in _SOURCE_LABELS:
+        if src in by_source:
+            ordered.append(f"{_SOURCE_LABELS[src]}{by_source.pop(src)}")
+    for src in sorted(by_source):
+        ordered.append(f"{src}{by_source[src]}")
+    console.print(f"[dim]召回 {len(hits)} 条：{' / '.join(ordered)}[/dim]")
 
 
 def _run_watch(settings: Settings, *, force: bool) -> None:
@@ -151,12 +207,16 @@ def query(
     """图谱推理问答（graph + vector + community 三路召回融合）。"""
     settings = _load_settings()
     setup_logging(settings.out_dir)
+    progress = RichProgressReporter(console)
     try:
-        result = pipeline.answer_query(settings, question, mode="query")
+        result = pipeline.answer_query(
+            settings, question, mode="query", progress=progress
+        )
     except pipeline.ColdStartError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from exc
 
+    _print_recall_summary(result.hits)
     answer = result.answer
     console.print(answer.text)
 
@@ -183,12 +243,16 @@ def ask(
     """向量路语义问答（仅向量召回，适合模糊语义匹配）。"""
     settings = _load_settings()
     setup_logging(settings.out_dir)
+    progress = RichProgressReporter(console)
     try:
-        result = pipeline.answer_query(settings, question, mode="ask")
+        result = pipeline.answer_query(
+            settings, question, mode="ask", progress=progress
+        )
     except pipeline.ColdStartError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from exc
 
+    _print_recall_summary(result.hits)
     answer = result.answer
     console.print(answer.text)
 
@@ -217,8 +281,9 @@ def search(
     settings = _load_settings()
     setup_logging(settings.out_dir)
     _ = community  # search 命令始终走社区路（命令映射固定），flag 保留作显式提示
+    progress = RichProgressReporter(console)
     try:
-        hits = pipeline.search_communities(settings, keyword)
+        hits = pipeline.search_communities(settings, keyword, progress=progress)
     except pipeline.ColdStartError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from exc
