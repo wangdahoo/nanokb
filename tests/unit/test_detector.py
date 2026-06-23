@@ -16,6 +16,11 @@ from pathlib import Path
 from typing import Any
 
 from nanokb.config import Settings
+from nanokb.config_signature import (
+    embedding_config_signature,
+    extraction_config_signature,
+    index_config_signature,
+)
 from nanokb.load import (
     ChangeSet,
     IngestResult,
@@ -41,9 +46,20 @@ def _file_state(
     llm_model: str = "glm-5.1",
     embedding_model: str = "text-embedding-3-small",
     extractor_version: str = "1",
+    **sig_overrides: Any,
 ) -> FileState:
-    """根据磁盘文件当前内容构造 FileState（sha256 取真实值）。"""
+    """根据磁盘文件当前内容构造 FileState（sha256 取真实值）。
+
+    用传入的 llm_model/embedding_model/extractor_version 及额外签名覆盖构造一个
+    对应 Settings，计算三层签名填入 FileState，使 unchanged 用例在五维比对下通过。
+    """
     rel = str(path.relative_to(raw_dir))
+    sig_settings = Settings(
+        llm_model=llm_model,
+        embedding_model=embedding_model,
+        extractor_version=extractor_version,
+        **sig_overrides,
+    )
     return FileState(
         path=rel,
         sha256=sha256_file(path),
@@ -51,6 +67,9 @@ def _file_state(
         extractor_version=extractor_version,
         llm_model=llm_model,
         embedding_model=embedding_model,
+        extraction_config=extraction_config_signature(sig_settings),
+        index_config=index_config_signature(sig_settings),
+        embedding_config=embedding_config_signature(sig_settings),
     )
 
 

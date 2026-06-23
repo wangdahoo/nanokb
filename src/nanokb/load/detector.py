@@ -3,11 +3,13 @@
 两块职责：
 
 1. **detect_changes**：比对 raw_dir 与 manifest，返回 ``ChangeSet{added, modified, deleted}``
-   三互斥集合。判定 modified 的四维身份（任一变更即触发重抽取）：
+   三互斥集合。判定 modified 的五维身份（任一变更即触发重抽取）：
    - ``sha256``（文件内容变更）
-   - ``extractor_version``（抽取器升级）
+   - ``extraction_config``（抽取配置签名：extractor_version / chunk_* /
+     concept_description_strategy / code_languages 折叠）
    - ``llm_model``（LLM 身份变更 → 抽取结果可能不同）
-   - ``embedding_model``（embedding 身份变更 → 向量侧需重建）
+   - ``index_config``（索引层签名：fallback_description_max_edges / leiden_symmetrize）
+   - ``embedding_config``（向量层签名：embedding_model / embedding_provider）
 
 2. **WatchQueue / start_watch**：watchdog Observer 回调仅累计事件 + debounce 500ms，
    到期将本窗口内所有变更路径并入 ``queue.Queue``；单工作线程串行消费（方案 §3.5.2
@@ -29,6 +31,11 @@ from watchdog.observers import Observer
 from watchdog.observers.api import BaseObserver
 
 from nanokb.config import Settings
+from nanokb.config_signature import (
+    embedding_config_signature,
+    extraction_config_signature,
+    index_config_signature,
+)
 from nanokb.models import Manifest
 from nanokb.utils.hashing import sha256_file
 
@@ -90,14 +97,18 @@ def detect_changes(raw_dir: Path, manifest: Manifest, settings: Settings) -> Cha
     判定规则：
     - 磁盘有、manifest 无 → ``added``
     - 磁盘无、manifest 有 → ``deleted``
-    - 都有但四维身份（sha256 / extractor_version / llm_model / embedding_model）
-      任一变更 → ``modified``
-    - 都有且四维全部一致 → 不在任何集合（unchanged）
+    - 都有但五维身份（sha256 / extraction_config / llm_model / index_config /
+      embedding_config）任一变更 → ``modified``
+    - 都有且五维全部一致 → 不在任何集合（unchanged）
 
     三集合构造上互斥（added ∩ modified = ∅，因为 added 要求 manifest 中无记录）。
     """
     current_paths = _iter_supported_files(raw_dir)
     current_keys: dict[str, Path] = {_rel_key(p, raw_dir): p for p in current_paths}
+
+    extraction_sig = extraction_config_signature(settings)
+    index_sig = index_config_signature(settings)
+    embedding_sig = embedding_config_signature(settings)
 
     added: list[str] = []
     modified: list[str] = []
@@ -107,13 +118,14 @@ def detect_changes(raw_dir: Path, manifest: Manifest, settings: Settings) -> Cha
         if state is None:
             added.append(rel_key)
             continue
-        # 四维身份比对（任一变更 → modified）
+        # 五维身份比对（任一变更 → modified）
         digest = sha256_file(path)
         if (
             state.sha256 != digest
-            or state.extractor_version != settings.extractor_version
+            or state.extraction_config != extraction_sig
             or state.llm_model != settings.llm_model
-            or state.embedding_model != settings.embedding_model
+            or state.index_config != index_sig
+            or state.embedding_config != embedding_sig
         ):
             modified.append(rel_key)
 
