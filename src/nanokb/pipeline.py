@@ -24,8 +24,9 @@
 ChromaDB），不消耗 LLM chat Token。
 
 **向量侧扩展点**：``VectorStoreBackend`` Protocol 定义流水线所需的最小向量库接口
-（delete_by_source / index_nodes）。``vector_store=None`` 时向量操作被跳过（stage4
-尚未实现的阶段）。s1-feat-011 的 ``VectorStore`` 将满足此协议。
+（delete_by_source / index_nodes）。s1-feat-011 的 ``VectorStore``（ChromaDB）满足此协议。
+``vector_store=None`` 时，compile 自动构造真实 ``VectorStore``（探测 embedding 维度后），
+使 CLI ``build`` 端到端产出 ChromaDB 向量；测试可注入 FakeVectorStore 替换。
 
 **问答流程**（``answer_query``）：阶段 3 仅 graph 路（Opt #5 降级），冷启动校验
 （graph.json 不存在或 raw/ 为空 → ``ColdStartError`` exit 1）。vector/community
@@ -70,6 +71,7 @@ from nanokb.stage1_load.ingest import ingest_file
 from nanokb.stage2_extract import build_default_extractor
 from nanokb.stage2_extract.base import Extractor
 from nanokb.stage3_compile import GraphBuilder
+from nanokb.stage4_index import VectorStore, build_indexes
 from nanokb.stage5_qa.generator import generate
 from nanokb.stage5_qa.prompt import compile_context
 from nanokb.stage5_qa.retriever import GraphRetriever
@@ -200,6 +202,17 @@ def compile(  # noqa: A001  — 故意与内建同名，方案 §3.5.1 指定
     if llm is None:
         llm = make_llm_client(settings)
 
+    # s1-feat-011: 向量库后端。vector_store=None 时自动构造真实 ChromaDB VectorStore，
+    # 使 CLI build 端到端产出向量。探测 embedding 维度保证 VectorStore 元数据与 llm.embed
+    # 实际输出维度一致（Medium #7 维度校验依赖此一致性）。
+    actual_embedding_dim = _probe_embedding_dim(llm)
+    if vector_store is None:
+        vector_store = VectorStore(
+            settings.out_dir / "chroma",
+            settings.embedding_model,
+            actual_embedding_dim,
+        )
+
     extractor: Extractor
     if extractor_factory is not None:
         extractor = extractor_factory(llm, settings)
@@ -297,8 +310,8 @@ def compile(  # noqa: A001  — 故意与内建同名，方案 §3.5.1 指定
             if subgraph.number_of_nodes() > 0:
                 vector_store.index_nodes(subgraph, llm)
 
-    # step 8: build_indexes（community + keyword）——s1-feat-011 实现
-    # staging_swap 自动跳过 staging 中缺失的 communities.json/keywords.json
+    # step 8: build_indexes（community + keyword）——s1-feat-011
+    # 由 _finalize_staging 内部调用 build_indexes 写入 staging 目录。
 
     # step 9: manifest 更新（仅 results_map 中成功抽取的 path，Opt #2 v4）
     now = _now_iso()
@@ -310,11 +323,17 @@ def compile(  # noqa: A001  — 故意与内建同名，方案 §3.5.1 指定
             extractor_version=settings.extractor_version,
             llm_model=settings.llm_model,
             embedding_model=settings.embedding_model,
-            embedding_dim=0,
+            embedding_dim=actual_embedding_dim,
         )
 
     # step 10-11: 序列化到 staging + 原子切换（manifest 最后写）
-    _finalize_staging(graph_builder, manifest, out_dir)
+    # llm=None: 社区摘要用启发式（成员名拼接，零 Token），避免给已有 LLM 调用计数
+    # 断言的集成测试引入额外 complete 调用。社区 LLM 摘要可经 detect_communities
+    # 直接调用时启用（llm 非 None），或后续 feature 增设开关接入。
+    _finalize_staging(
+        graph_builder, manifest, out_dir,
+        graph=graph, settings=settings, llm=None,
+    )
 
     logger.info(
         "compile done: added=%d modified=%d deleted=%d extracted=%d skipped=%d fallback=%d",
@@ -388,7 +407,8 @@ def replay(settings: Settings) -> ReplayResult:
 
     # step 7: 跳过（replay 不重建向量库）
 
-    # step 8: build_indexes —— s1-feat-011 实现
+    # step 8: build_indexes —— s1-feat-011（由 _finalize_staging 内部调用，
+    # llm=None 时社区摘要降级为启发式，零 Token）
 
     # step 9: manifest 更新
     now = _now_iso()
@@ -402,13 +422,16 @@ def replay(settings: Settings) -> ReplayResult:
             extractor_version=settings.extractor_version,
             llm_model=settings.llm_model,
             embedding_model=settings.embedding_model,
-            embedding_dim=0,
+            embedding_dim=existing.embedding_dim if existing else 0,
         )
     for path in deleted_files:
         manifest.files.pop(path, None)
 
     # step 10-11: 序列化 + 原子切换
-    _finalize_staging(graph_builder, manifest, out_dir)
+    _finalize_staging(
+        graph_builder, manifest, out_dir,
+        graph=graph, settings=settings, llm=None,
+    )
 
     logger.info(
         "replay done: rebuilt=%d deleted=%d fallback=%d",
@@ -676,15 +699,51 @@ def _schema_version_key_raw(version: str) -> int:
 
 
 def _finalize_staging(
-    graph_builder: GraphBuilder, manifest: Manifest, out_dir: Path
+    graph_builder: GraphBuilder,
+    manifest: Manifest,
+    out_dir: Path,
+    *,
+    graph: nx.MultiDiGraph | None = None,
+    settings: Settings | None = None,
+    llm: LLMClient | None = None,
 ) -> None:
-    """序列化图谱与 manifest 到 staging 目录，再原子切换到 out/。"""
+    """序列化图谱与 manifest 到 staging 目录，再原子切换到 out/。
+
+    s1-feat-011：当提供 ``graph`` 与 ``settings`` 时，执行 step 8 ``build_indexes``
+    （community + keyword），将 ``communities.json`` 与 ``keywords.json`` 写入 staging，
+    随 ``staging_swap`` 原子切换（v4 Opt #1 五件套）。``llm`` 为 None 时社区摘要
+    降级为启发式（成员名拼接，零 Token）。
+    """
     staging = out_dir / STAGING_DIRNAME
     staging.mkdir(parents=True, exist_ok=True)
 
     graph_builder.save_graph(staging)
+
+    # step 8: build_indexes（community + keyword）——s1-feat-011
+    if graph is not None and settings is not None:
+        build_indexes(graph, settings, llm, staging)
+
     atomic_write_json(staging / "manifest.json", manifest.model_dump(mode="json"))
     staging_swap(staging, out_dir)
+
+
+def _probe_embedding_dim(llm: LLMClient) -> int:
+    """探测 ``llm.embed`` 实际输出维度（用于 VectorStore 元数据 + FileState）。
+
+    发送单条探针文本，取返回向量的维度。探测失败（网络 / API 异常）时返回 0，
+    VectorStore 以 dim=0 构造（metadata 记 0，ChromaDB 实际维度由首次 upsert 推断）。
+    """
+    try:
+        probe = llm.embed(["nanokb-embedding-dim-probe"])
+        if probe and probe[0]:
+            return len(probe[0])
+    except Exception:
+        logger.debug(
+            "embedding dim probe failed; defaulting to 0",
+            exc_info=True,
+            extra={"stage": "compile"},
+        )
+    return 0
 
 
 __all__ = [
