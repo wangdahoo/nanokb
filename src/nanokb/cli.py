@@ -1,8 +1,9 @@
 """Nano KB CLI —— typer 命令（方案 §3.1 + §3.5.3）。
 
 六个子命令：build / query / ask / search / status / review。
-build 已接入流水线（Feature s1-feat-008）；query/ask/search/review 仍为打桩
-（后续 feature 接入问答与主动学习闭环）。
+build 接入编译流水线（Feature s1-feat-008）；query 接入图路问答
+（Feature s1-feat-009，Opt #5 v3 降级：仅 graph 路）；ask/search 为阶段 3 打桩
+（Opt #5 v3，阶段 4 s1-feat-012 接入真实 retriever）；review 待 s1-feat-013 接入。
 """
 
 from __future__ import annotations
@@ -145,19 +146,41 @@ def build(
 def query(
     question: str = typer.Argument(..., help="自然语言问题。"),
 ) -> None:
-    """图谱推理问答（三路召回融合；阶段 3 仅 graph 路）。"""
-    console.print(
-        f"[yellow]query 命令尚未接入问答流水线（Phase 0 骨架）。问题：{question}[/yellow]"
-    )
+    """图谱推理问答（三路召回融合；阶段 3 仅 graph 路，Opt #5 降级）。"""
+    settings = _load_settings()
+    setup_logging(settings.out_dir)
+    try:
+        result = pipeline.answer_query(settings, question)
+    except pipeline.ColdStartError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+
+    answer = result.answer
+    console.print(answer.text)
+
+    if answer.citations:
+        unique = []
+        seen: set[str] = set()
+        for cite in answer.citations:
+            if cite not in seen:
+                seen.add(cite)
+                unique.append(cite)
+        console.print(f"\n[dim]引用来源：{', '.join(unique)}[/dim]")
+    elif result.hits:
+        sources: set[str] = {
+            h.triple.source_file for h in result.hits if h.triple is not None
+        }
+        if sources:
+            console.print(f"\n[dim]引用来源：{', '.join(sorted(sources))}[/dim]")
 
 
 @app.command()
 def ask(
     question: str = typer.Argument(..., help="自然语言问题。"),
 ) -> None:
-    """向量路语义问答（阶段 3 打桩，阶段 4 补全）。"""
+    """向量路语义问答（阶段 3 打桩，Opt #5 v3；阶段 4 s1-feat-012 补全）。"""
     console.print(
-        f"[yellow]ask 命令需先完成阶段 4（向量索引）后接入。问题：{question}[/yellow]"
+        "该命令需先完成阶段4（向量索引）后接入。请先运行 nanokb build 完成高级索引。"
     )
 
 
@@ -166,10 +189,10 @@ def search(
     keyword: str = typer.Argument(..., help="检索关键词。"),
     community: bool = typer.Option(False, "--community", help="社区宏观检索。"),
 ) -> None:
-    """社区路宏观检索（阶段 3 打桩，阶段 4 补全）。"""
+    """社区路宏观检索（阶段 3 打桩，Opt #5 v3；阶段 4 s1-feat-012 补全）。"""
+    _ = community  # 阶段 4 s1-feat-012 接入社区检索时消费
     console.print(
-        f"[yellow]search 命令需先完成阶段 4（社区索引）后接入。"
-        f"关键词：{keyword}, community={community}[/yellow]"
+        "该命令需先完成阶段4（社区索引）后接入。请先运行 nanokb build 完成高级索引。"
     )
 
 

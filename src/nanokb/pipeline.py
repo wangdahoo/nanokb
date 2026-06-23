@@ -1,4 +1,5 @@
-"""编译流水线编排（方案 §3.5.1 + §3.5.5，Feature s1-feat-008）。
+"""编译流水线编排（方案 §3.5.1 + §3.5.5，Feature s1-feat-008）+
+问答流程编排（方案 §3.5.3，Feature s1-feat-009）。
 
 **两阶段结构**（v3 Medium #1 一致性核心）：
 
@@ -25,6 +26,10 @@ ChromaDB），不消耗 LLM chat Token。
 **向量侧扩展点**：``VectorStoreBackend`` Protocol 定义流水线所需的最小向量库接口
 （delete_by_source / index_nodes）。``vector_store=None`` 时向量操作被跳过（stage4
 尚未实现的阶段）。s1-feat-011 的 ``VectorStore`` 将满足此协议。
+
+**问答流程**（``answer_query``）：阶段 3 仅 graph 路（Opt #5 降级），冷启动校验
+（graph.json 不存在或 raw/ 为空 → ``ColdStartError`` exit 1）。vector/community
+三路融合在 s1-feat-012 接入。
 """
 
 from __future__ import annotations
@@ -43,17 +48,27 @@ from nanokb.config import Settings
 from nanokb.llm.base import LLMClient, make_llm_client
 from nanokb.loaders import LoaderRegistry, UnstructuredLoader, UnsupportedFormatError
 from nanokb.models import (
+    Answer,
     Concept,
     ExtractionResult,
     FileState,
     Manifest,
+    RetrievalHit,
     Triple,
 )
-from nanokb.stage1_load.detector import ChangeSet, detect_changes
+from nanokb.stage1_load.detector import (
+    SUPPORTED_SUFFIXES,
+    ChangeSet,
+    detect_changes,
+)
 from nanokb.stage1_load.ingest import ingest_file
 from nanokb.stage2_extract.base import Extractor
 from nanokb.stage2_extract.semantic_track import SemanticTrack
 from nanokb.stage3_compile import GraphBuilder
+from nanokb.stage5_qa.generator import generate
+from nanokb.stage5_qa.prompt import compile_context
+from nanokb.stage5_qa.retriever import GraphRetriever
+from nanokb.stage5_qa.review import should_flag
 from nanokb.utils.io import atomic_write_json, staging_swap
 
 logger = logging.getLogger("nanokb")
@@ -88,6 +103,17 @@ class ReplayResult(BaseModel):
     rebuilt_files: list[str] = Field(default_factory=list)
     deleted_files: list[str] = Field(default_factory=list)
     synthesized_fallback_count: int = 0
+
+
+class AnswerQueryResult(BaseModel):
+    """answer_query() 返回值：答案 + 召回命中（供 CLI 展示引用/调试）。"""
+
+    answer: Answer
+    hits: list[RetrievalHit] = Field(default_factory=list)
+
+
+class ColdStartError(RuntimeError):
+    """图谱未编译（冷启动，Opt #8）——CLI 应提示并 exit 1。"""
 
 
 # ── 向量库后端协议（s1-feat-011 VectorStore 满足） ────────────────────
@@ -389,6 +415,59 @@ def replay(settings: Settings) -> ReplayResult:
     )
 
 
+# ── 问答 ──────────────────────────────────────────────────────────────
+
+
+def answer_query(
+    settings: Settings,
+    question: str,
+    *,
+    llm: LLMClient | None = None,
+    graph: nx.MultiDiGraph | None = None,
+) -> AnswerQueryResult:
+    """执行 query 问答流程（方案 §3.5.3，阶段 3 仅 graph 路，Opt #5 降级）。
+
+    流程：
+    1. 冷启动校验（Opt #8）：``out/graph.json`` 不存在或 ``raw/`` 为空 →
+       抛 ``ColdStartError``，CLI 据此 exit 1 并提示用户先 build。
+    2. 加载 graph + retriever.recall：NER → normalize → 查图 → fuzzy → N 跳扩展。
+    3. ``compile_context`` 渲染 hits 为纯文本上下文（tiktoken 裁剪）。
+    4. ``generate`` 生成带 ``^[source_file]`` 引用的 ``Answer``。
+    5. ``should_flag`` 判定是否入 review_queue（写入由 s1-feat-013 接入）。
+
+    Args:
+        settings: 全局配置。
+        question: 用户自然语言问题。
+        llm: LLM 客户端；``None`` 时经 ``make_llm_client`` 创建（缺 key exit 2）。
+        graph: 已加载的图谱；``None`` 时从 ``out/graph.json`` 加载。
+
+    Returns:
+        ``AnswerQueryResult`` —— 答案 + 召回命中。
+
+    Raises:
+        ColdStartError: 图谱未编译（Opt #8）。
+    """
+    if _is_cold_start(settings):
+        logger.warning(
+            "cold start: graph.json exists=%s, raw_empty=%s",
+            (settings.out_dir / "graph.json").exists(),
+            _is_raw_empty(settings.raw_dir),
+        )
+        raise ColdStartError("知识库未编译，请先运行 nanokb build")
+
+    if graph is None:
+        graph = _load_graph(settings.out_dir)
+    if llm is None:
+        llm = make_llm_client(settings)
+
+    retriever = GraphRetriever(graph, llm, settings)
+    hits = retriever.recall(question)
+    context = compile_context(hits, settings, llm)
+    answer = generate(question, context, hits, llm, settings)
+    answer.review_flagged = should_flag(hits, settings)
+    return AnswerQueryResult(answer=answer, hits=hits)
+
+
 # ── 辅助函数 ──────────────────────────────────────────────────────────
 
 
@@ -405,6 +484,26 @@ def build_default_registry() -> LoaderRegistry:
 def _now_iso() -> str:
     """当前 UTC 时间的 ISO 8601 字符串（用于 triples.jsonl 时间戳，可字典序排序）。"""
     return datetime.now(timezone.utc).isoformat()
+
+
+def _is_raw_empty(raw_dir: Path) -> bool:
+    """raw_dir 不存在或无任何受支持文档文件时为空。"""
+    if not raw_dir.exists():
+        return True
+    for p in raw_dir.rglob("*"):
+        if p.is_file() and p.suffix.lower() in SUPPORTED_SUFFIXES:
+            return False
+    return True
+
+
+def _is_cold_start(settings: Settings) -> bool:
+    """冷启动判定（Opt #8）：graph.json 不存在 OR raw/ 为空。"""
+    graph_path = settings.out_dir / "graph.json"
+    if not graph_path.exists():
+        return True
+    if _is_raw_empty(settings.raw_dir):
+        return True
+    return False
 
 
 def _load_manifest(out_dir: Path) -> Manifest:
@@ -581,9 +680,12 @@ def _finalize_staging(
 __all__ = [
     "SCHEMA_VERSION",
     "TRIPLES_FILENAME",
+    "AnswerQueryResult",
+    "ColdStartError",
     "CompileResult",
     "ReplayResult",
     "VectorStoreBackend",
+    "answer_query",
     "build_default_registry",
     "compile",
     "replay",
