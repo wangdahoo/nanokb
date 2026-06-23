@@ -12,16 +12,31 @@ from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def _project_env_file() -> Path:
+    """定位项目根目录的 ``.env``，锚定到 ``pyproject.toml`` 所在位置。
+
+    pydantic-settings 默认按 CWD 解析相对 ``env_file``，导致从非项目根目录
+    运行时读不到 ``.env``。这里向上查找 ``pyproject.toml`` 作为项目根锚点，
+    使 ``.env`` 加载与运行目录无关。
+    """
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        if (parent / "pyproject.toml").exists():
+            return parent / ".env"
+    return here.parent.parent / ".env"
+
+
 class Settings(BaseSettings):
     """Nano KB 全局配置。
 
     所有字段均可通过 ``NANOKB_<FIELD_NAME>`` 环境变量覆盖，
     或在项目根 ``.env`` 文件中配置（``env_nested_delimiter="__"``）。
+    ``.env`` 的定位与运行目录无关，始终锚定到项目根。
     """
 
     model_config = SettingsConfigDict(
         env_prefix="NANOKB_",
-        env_file=".env",
+        env_file=_project_env_file(),
         env_nested_delimiter="__",
         extra="ignore",
     )
