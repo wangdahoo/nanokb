@@ -217,16 +217,29 @@ def test_ner_malformed_json_returns_empty_entities() -> None:
 # ── score / confidence ──────────────────────────────────────────────
 
 
-def test_inferred_edge_score_weighted_lower_than_extracted() -> None:
+def test_inferred_edge_score_raw_similarity_confidence_in_triple() -> None:
+    """GraphRetriever 返回原始相似度（精确匹配=1.0）；confidence 由 fuse 统一加权。
+
+    s1-feat-012 重构：``hit.score`` 为原始相似度（不再乘 confidence 权重），
+    权重乘入由 ``MultiRetriever.fuse`` 统一执行（保证 graph/vector/community
+    三路口径一致）。本测验证 score 字段为原始相似度，confidence 仍正确标注在
+    triple 上供 fuse 读取。
+    """
     graph = _build_graph()
     # Transformer-uses->Attention EXTRACTED；Transformer-is_a->Model INFERRED
     llm = FakeLLMClient(responses=[_ner_response(["Transformer"])])
     retriever = GraphRetriever(graph, llm, Settings())
 
     hits = retriever.recall("q")
-    by_rel = {h.triple.relation: h.score for h in hits if h.triple is not None}
-    assert by_rel["uses"] == 1.0  # EXTRACTED
-    assert by_rel["is_a"] == 0.6  # INFERRED
+    by_rel_score = {h.triple.relation: h.score for h in hits if h.triple is not None}
+    by_rel_conf = {h.triple.relation: h.triple.confidence for h in hits if h.triple is not None}
+    # score 一律原始相似度 1.0（精确图节点匹配）
+    assert by_rel_score["uses"] == 1.0
+    assert by_rel_score["is_a"] == 1.0
+    # confidence 差异保留在 triple 上（fuse 据此加权排序）
+    from nanokb.models import Confidence
+    assert by_rel_conf["uses"] == Confidence.EXTRACTED
+    assert by_rel_conf["is_a"] == Confidence.INFERRED
 
 
 def test_hits_carry_source_file_from_edge_data() -> None:

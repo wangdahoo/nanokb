@@ -76,13 +76,22 @@ def _extract_response() -> str:
 
 
 def _build_compiled_kb(tmp_path: Path) -> Settings:
-    """构造已编译的 KB（Transformer → Attention/Model 图谱）。"""
+    """构造已编译的 KB（Transformer → Attention/Model 图谱）。
+
+    s1-feat-012：``answer_query`` 升级为三路融合后，本夹具默认禁用向量/社区召回，
+    使本文件的既有 graph 路行为断言保持稳定（三路融合行为在 test_fusion.py 覆盖）。
+    """
     raw_dir = tmp_path / "raw"
     out_dir = tmp_path / "out"
     raw_dir.mkdir()
     (raw_dir / "doc.md").write_text("# Transformer\n\nUses attention.", encoding="utf-8")
 
-    settings = Settings(raw_dir=raw_dir, out_dir=out_dir)
+    settings = Settings(
+        raw_dir=raw_dir,
+        out_dir=out_dir,
+        enable_vector_recall=False,
+        enable_community_recall=False,
+    )
     llm = FakeLLMClient(responses=[_extract_response()])
     pipeline.compile(settings, llm=llm)
     return settings

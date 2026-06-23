@@ -1,26 +1,31 @@
-"""图谱召回器（方案 §3.5.3 step 3-4 + Medium #10，Feature s1-feat-009）。
+"""三路召回融合（方案 §3.5.3 step 3-4 + §3.5.4，Feature s1-feat-009 + s1-feat-012）。
 
-``GraphRetriever.recall`` 实现图路召回的完整链路（Opt #5 v3 降级：阶段 3 仅此路）：
+四块职责（s1-feat-012 完成三路融合）：
 
-1. **LLM NER**：从自然语言问题抽取实体提及（``parse_json_loose`` 容错）。
-2. **normalize_entity 预处理**（Medium #10）：大小写/空白归一化，保证抽取端与查询端
-   实体名比对一致（``Transformer`` / ``  transformer `` / ``TRANSFORMER`` 视作同一）。
-3. **精确匹配**：归一化形式在图节点归一化索引中查找。
-4. **fuzzy 兜底**：未命中走 ``difflib.get_close_matches``（cutoff=fuzzy_match_cutoff），
-   避免大小写/前后缀不一致漏召回。
-5. **N 跳 BFS 子图扩展**：从种子节点向外扩展 ``retrieval_hops`` 跳，收集子图。
-6. **hit 构建**：子图边转 ``RetrievalHit``（score = confidence 权重 × 图路相似度 1.0）。
+1. **GraphRetriever**（s1-feat-009）：NER → normalize → 查图 → fuzzy 兜底 → N 跳子图扩展。
+   ``SOURCE = "graph"``。
+2. **VectorRetriever**（s1-feat-012）：embed query → ChromaDB 近邻查询。``SOURCE = "vector"``。
+3. **CommunityRetriever**（s1-feat-012）：NER → 社区成员匹配 → 社区摘要 hit。
+   ``SOURCE = "community"``。
+4. **MultiRetriever + fuse**（s1-feat-012）：按命令映射启用 retriever 子集
+   （query=三路 / ask=仅向量 / search=仅社区），融合去重重排（confidence 权重 × 相似度），
+   tiktoken 裁剪到 ``max_context_tokens``。
 
-``VectorRetriever`` / ``CommunityRetriever`` / ``MultiRetriever`` 三路融合在
-s1-feat-012 补全。本类的 ``SOURCE = "graph"`` 用于 ``RetrievalHit.source`` 字段。
+**score 语义统一约定**（s1-feat-012 拍定）：各 retriever 返回的 ``RetrievalHit.score``
+一律为**原始相似度**（graph 精确匹配=1.0；vector=1.0−distance；community=NER 实体对社区
+成员的覆盖率），confidence 权重不在此处乘入。``fuse`` 统一按
+``_CONFIDENCE_WEIGHT[confidence] × score`` 计算最终融合分并排序——这样三路相似度口径
+一致，融合排序唯一可复现（方案 §3.5.3 step 4）。
 """
 
 from __future__ import annotations
 
 import difflib
 import logging
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Protocol
 
-import networkx as nx  # type: ignore[import-untyped]  # networkx 3.x 缺 py.typed 标记
+import networkx as nx  # type: ignore[import-untyped]
 
 from nanokb.config import Settings
 from nanokb.llm.base import LLMClient, parse_json_loose
@@ -31,18 +36,26 @@ from nanokb.models import (
     Triple,
 )
 from nanokb.stage3_compile.normalize import normalize_entity
+from nanokb.stage5_qa.prompt import render_hit
+
+if TYPE_CHECKING:
+    from nanokb.stage4_index.community import CommunityResult
+    from nanokb.stage4_index.vector_store import VectorStore
 
 logger = logging.getLogger("nanokb")
 
-#: confidence 权重（与方案 §3.5.3 step 4 fuse 权重一致）
+#: confidence 权重（与方案 §3.5.3 step 4 fuse 权重一致；fuse 据此 × 相似度排序）。
 _CONFIDENCE_WEIGHT: dict[Confidence, float] = {
     Confidence.EXTRACTED: 1.0,
     Confidence.INFERRED: 0.6,
     Confidence.AMBIGUOUS: 0.3,
 }
 
-#: 图路相似度（精确图节点匹配视为满相似度）
+#: 图路相似度（精确图节点匹配视为满相似度，graph 路 recall 的原始相似度）。
 _GRAPH_SIMILARITY: float = 1.0
+
+#: VectorRetriever 默认召回数（提供给 ChromaDB search 的 k 值）。
+_VECTOR_SEARCH_K: int = 10
 
 _NER_SYSTEM_PROMPT = (
     "You are an entity recognizer. Read the user's question and extract all "
@@ -58,10 +71,61 @@ _NER_SYSTEM_PROMPT = (
 )
 
 
+# ── Retriever 协议 ────────────────────────────────────────────────────
+
+
+class Retriever(Protocol):
+    """单路召回器协议：``recall(question)`` 返回 ``RetrievalHit`` 列表。
+
+    实现方：``GraphRetriever`` / ``VectorRetriever`` / ``CommunityRetriever``。
+    所有 retriever 返回的 ``hit.score`` 必须为**原始相似度**（不含 confidence 权重），
+    权重乘入由 ``fuse`` 统一执行（s1-feat-012 拍定，保证三路口径一致）。
+    """
+
+    SOURCE: str
+
+    def recall(self, question: str) -> list[RetrievalHit]:
+        """从问题召回图谱/向量/社区 hit 列表。"""
+        ...
+
+
+# ── 共用 NER 辅助 ─────────────────────────────────────────────────────
+
+
+def _ner_entities(llm: LLMClient, question: str) -> list[str]:
+    """调用 LLM 抽取问题中的实体提及（``parse_json_loose`` 容错）。
+
+    graph / community 两路都需要 NER，抽出来共享避免重复实现。
+    """
+    raw = llm.complete(
+        _NER_SYSTEM_PROMPT,
+        question,
+        response_format="json",
+        temperature=0.0,
+    )
+    parsed = parse_json_loose(raw)
+    if not isinstance(parsed, dict):
+        logger.warning("NER returned non-dict, falling back to empty")
+        return []
+    entities = parsed.get("entities")
+    if not isinstance(entities, list):
+        return []
+    result: list[str] = []
+    for ent in entities:
+        if isinstance(ent, (str, int, float)):
+            text = str(ent).strip()
+            if text:
+                result.append(text)
+    return result
+
+
+# ── GraphRetriever（s1-feat-009） ─────────────────────────────────────
+
+
 class GraphRetriever:
     """图谱召回器：NER → normalize → 查图 → fuzzy 兜底 → N 跳子图扩展。"""
 
-    #: ``RetrievalHit.source`` 标识（s1-feat-012 的多路融合按此字段区分）。
+    #: ``RetrievalHit.source`` 标识（``MultiRetriever`` 按此字段区分来源）。
     SOURCE = "graph"
 
     def __init__(
@@ -83,7 +147,7 @@ class GraphRetriever:
         if self._graph.number_of_nodes() == 0:
             return []
 
-        entities = self._extract_entities(question)
+        entities = _ner_entities(self._llm, question)
         if not entities:
             logger.debug("recall: NER returned no entities for question: %s", question)
             return []
@@ -95,31 +159,6 @@ class GraphRetriever:
 
         subgraph = self._expand_subgraph(seeds)
         return self._build_hits(subgraph)
-
-    # ── NER ──────────────────────────────────────────────────────────
-
-    def _extract_entities(self, question: str) -> list[str]:
-        """调用 LLM 抽取问题中的实体提及（parse_json_loose 容错）。"""
-        raw = self._llm.complete(
-            _NER_SYSTEM_PROMPT,
-            question,
-            response_format="json",
-            temperature=0.0,
-        )
-        parsed = parse_json_loose(raw)
-        if not isinstance(parsed, dict):
-            logger.warning("recall: NER returned non-dict, falling back to empty")
-            return []
-        entities = parsed.get("entities")
-        if not isinstance(entities, list):
-            return []
-        result: list[str] = []
-        for ent in entities:
-            if isinstance(ent, (str, int, float)):
-                text = str(ent).strip()
-                if text:
-                    result.append(text)
-        return result
 
     # ── 实体匹配（精确 + fuzzy） ─────────────────────────────────────
 
@@ -207,7 +246,10 @@ class GraphRetriever:
     # ── hit 构建 ─────────────────────────────────────────────────────
 
     def _build_hits(self, subgraph: nx.MultiDiGraph) -> list[RetrievalHit]:
-        """子图边转 RetrievalHit；无边时退化用种子节点描述构造 concept hit。"""
+        """子图边转 RetrievalHit；score 为原始相似度（confidence 权重由 fuse 统一乘入）。
+
+        无边时退化用种子节点描述构造 concept hit（避免空召回漏报）。
+        """
         hits: list[RetrievalHit] = []
         seen_keys: set[tuple[str, str, str, str]] = set()
 
@@ -230,7 +272,7 @@ class GraphRetriever:
             hits.append(
                 RetrievalHit(
                     triple=triple,
-                    score=_CONFIDENCE_WEIGHT.get(confidence, 1.0) * _GRAPH_SIMILARITY,
+                    score=_GRAPH_SIMILARITY,
                     source=self.SOURCE,
                 )
             )
@@ -254,11 +296,280 @@ class GraphRetriever:
                         source_file=source_file,
                         confidence=confidence,
                     ),
-                    score=_CONFIDENCE_WEIGHT.get(confidence, 1.0) * _GRAPH_SIMILARITY,
+                    score=_GRAPH_SIMILARITY,
                     source=self.SOURCE,
                 )
             )
         return hits
+
+
+# ── VectorRetriever（s1-feat-012） ────────────────────────────────────
+
+
+class VectorRetriever:
+    """向量召回器：embed query → ChromaDB 近邻查询。
+
+    包装 ``stage4_index.vector_store.VectorStore.search``，返回 ``source="vector"``
+    的 ``RetrievalHit`` 列表。``hit.score`` 为原始相似度（``1.0 - distance``），
+    confidence 统一为 ``EXTRACTED``（向量召回无三元组置信度概念，由 fuse 权重为 1.0）。
+    """
+
+    SOURCE = "vector"
+
+    def __init__(
+        self,
+        vector_store: VectorStore,
+        llm: LLMClient,
+        settings: Settings,
+    ) -> None:
+        self._vector_store = vector_store
+        self._llm = llm
+        self._settings = settings
+
+    def recall(self, question: str) -> list[RetrievalHit]:
+        """向量语义召回：embed query → ChromaDB 近邻查询 → RetrievalHit 列表。
+
+        ``VectorStore.search`` 失败（如 collection 损坏）时降级为空召回，不阻塞融合。
+        """
+        try:
+            hits = self._vector_store.search(
+                question, k=_VECTOR_SEARCH_K, llm=self._llm
+            )
+        except Exception:
+            logger.warning(
+                "vector recall failed; degrading to empty",
+                exc_info=True,
+                extra={"stage": "qa-retriever"},
+            )
+            return []
+        # VectorStore.search 已写入 source="vector"；统一显式标 SOURCE 防漂移。
+        return [h.model_copy(update={"source": self.SOURCE}) for h in hits]
+
+
+# ── CommunityRetriever（s1-feat-012） ─────────────────────────────────
+
+
+class CommunityRetriever:
+    """社区召回器：NER → 社区成员匹配 → 社区摘要 hit。
+
+    对问题做 NER，把实体归一化后与各社区成员集合做交集；命中社区返回携带
+    ``community_summary`` 的 ``RetrievalHit``。``hit.score`` 为实体覆盖率
+    （命中社区成员数 / NER 实体数），反映问题与社区主题的相关度。
+    """
+
+    SOURCE = "community"
+
+    def __init__(
+        self,
+        communities: CommunityResult,
+        graph: nx.MultiDiGraph,
+        llm: LLMClient,
+        settings: Settings,
+    ) -> None:
+        self._communities = communities
+        self._graph = graph
+        self._llm = llm
+        self._settings = settings
+
+    def recall(self, question: str) -> list[RetrievalHit]:
+        """社区宏观召回：NER → 社区成员匹配 → 命中社区的摘要 hit 列表。"""
+        if not self._communities.communities:
+            return []
+
+        entities = _ner_entities(self._llm, question)
+        if not entities:
+            return []
+
+        norm_entities = {normalize_entity(e) for e in entities if normalize_entity(e)}
+        if not norm_entities:
+            return []
+
+        hits: list[RetrievalHit] = []
+        for comm in self._communities.communities:
+            norm_members = {normalize_entity(m) for m in comm.members}
+            overlap = norm_entities & norm_members
+            if not overlap:
+                continue
+            similarity = len(overlap) / len(norm_entities)
+            source_file = comm.source_files[0] if comm.source_files else ""
+            hits.append(
+                RetrievalHit(
+                    community_summary=comm.summary,
+                    concept=Concept(
+                        name=f"community-{comm.id}",
+                        description=comm.summary,
+                        source_file=source_file,
+                        confidence=Confidence.EXTRACTED,
+                        node_type="community",
+                    ),
+                    score=similarity,
+                    source=self.SOURCE,
+                )
+            )
+        return hits
+
+
+# ── MultiRetriever + fuse（s1-feat-012） ──────────────────────────────
+
+
+class MultiRetriever:
+    """多路召回编排器：按命令映射启用 retriever 子集，融合 fuse 重排。
+
+    用法：``MultiRetriever([g, v, c], settings, llm).recall(question)`` —— 依次调用
+    各 retriever.recall，合并结果后经 ``fuse`` 去重重排 + tiktoken 裁剪。
+
+    任一 retriever 抛错被捕获并降级为空召回（不阻塞其他路），符合"三路可并行召回
+    后 fuse"的容错语义（方案 technical_notes）。
+    """
+
+    def __init__(
+        self,
+        retrievers: list[Retriever],
+        settings: Settings,
+        llm: LLMClient,
+    ) -> None:
+        self._retrievers = list(retrievers)
+        self._settings = settings
+        self._llm = llm
+
+    def recall(self, question: str) -> list[RetrievalHit]:
+        """依次调用各 retriever，合并 → fuse（去重 + confidence 权重排序 + 裁剪）。"""
+        all_hits: list[RetrievalHit] = []
+        for retriever in self._retrievers:
+            try:
+                hits = retriever.recall(question)
+            except Exception:
+                logger.warning(
+                    "retriever %s failed; degrading to empty",
+                    type(retriever).__name__,
+                    exc_info=True,
+                    extra={"stage": "qa-retriever"},
+                )
+                hits = []
+            all_hits.extend(hits)
+        return fuse(all_hits, self._settings, self._llm)
+
+
+def fuse(
+    hits: list[RetrievalHit],
+    settings: Settings,
+    llm: LLMClient,
+) -> list[RetrievalHit]:
+    """三路融合：去重 → confidence 权重 × 相似度排序 → tiktoken 裁剪。
+
+    步骤（方案 §3.5.3 step 4）：
+    1. **去重**：triple hit 按 ``(head, relation, tail, source_file, retriever)``，
+       concept hit 按 ``(name, retriever)``，community hit 按 ``community_summary``。
+       同键保留首个（已按 retriever 调用顺序排列）。
+    2. **重排**：按 ``_CONFIDENCE_WEIGHT[confidence] × hit.score`` 降序稳定排序
+       —— EXTRACTED(1.0) > INFERRED(0.6) > AMBIGUOUS(0.3)，相同加权分保留入序。
+    3. **裁剪**：逐条 ``render_hit`` + ``llm.count_tokens`` 累加到 ``max_context_tokens``
+       停止（至少保留 1 条，避免完全空）——复用 ``prompt`` 模块的渲染口径。
+
+    Args:
+        hits: 三路召回合并后的原始 hit 列表（``hit.score`` 为原始相似度）。
+        settings: 提供 ``max_context_tokens`` 裁剪阈值。
+        llm: 提供 ``count_tokens`` 做 tiktoken 精确计数。
+
+    Returns:
+        融合后的 hit 列表，按 confidence 权重 × 相似度降序排列，已裁剪到上限内。
+    """
+    if not hits:
+        return []
+
+    deduped = _dedup_hits(hits)
+    ranked = sorted(deduped, key=_weighted_score, reverse=True)
+    return _truncate_to_context(ranked, settings, llm)
+
+
+# ── fuse 内部辅助 ─────────────────────────────────────────────────────
+
+
+def _weighted_score(hit: RetrievalHit) -> float:
+    """计算融合分：``_CONFIDENCE_WEIGHT[confidence] × hit.score``。
+
+    confidence 从 ``triple.confidence`` / ``concept.confidence`` 读取；二者均无时
+    默认 EXTRACTED（社区摘要、无 triple 的 concept hit）。
+    """
+    confidence = _hit_confidence(hit)
+    weight = _CONFIDENCE_WEIGHT.get(confidence, 1.0)
+    return weight * hit.score
+
+
+def _hit_confidence(hit: RetrievalHit) -> Confidence:
+    """从 hit 读取 confidence（triple 优先，其次 concept，默认 EXTRACTED）。"""
+    if hit.triple is not None:
+        return hit.triple.confidence
+    if hit.concept is not None:
+        return hit.concept.confidence
+    return Confidence.EXTRACTED
+
+
+def _dedup_hits(hits: list[RetrievalHit]) -> list[RetrievalHit]:
+    """按 hit 类型去重，同键保留首个。
+
+    - triple hit：``(head, relation, tail, source_file, source)`` —— 不同 retriever
+      对同一三元组的召回都保留（source 不同视为不同证据）。
+    - concept hit（无 triple）：``(concept.name, source)``。
+    - community hit：``community_summary``（摘要文本相同视为同一社区）。
+    """
+    seen_triples: set[tuple[str, str, str, str, str]] = set()
+    seen_concepts: set[tuple[str, str]] = set()
+    seen_communities: set[str] = set()
+    result: list[RetrievalHit] = []
+
+    for hit in hits:
+        if hit.triple is not None:
+            t = hit.triple
+            triple_key = (t.head, t.relation, t.tail, t.source_file, hit.source)
+            if triple_key in seen_triples:
+                continue
+            seen_triples.add(triple_key)
+            result.append(hit)
+            continue
+        if hit.concept is not None and hit.community_summary is None:
+            concept_key = (hit.concept.name, hit.source)
+            if concept_key in seen_concepts:
+                continue
+            seen_concepts.add(concept_key)
+            result.append(hit)
+            continue
+        if hit.community_summary is not None:
+            if hit.community_summary in seen_communities:
+                continue
+            seen_communities.add(hit.community_summary)
+            result.append(hit)
+    return result
+
+
+def _truncate_to_context(
+    hits: list[RetrievalHit],
+    settings: Settings,
+    llm: LLMClient,
+) -> list[RetrievalHit]:
+    """按 tiktoken 计数裁剪 hits 到 ``max_context_tokens``（至少保留 1 条）。
+
+    复用 ``prompt.render_hit`` 的渲染口径，保证裁剪与最终上下文渲染口径一致
+    （technical_notes："fuse 的 tiktoken 裁剪复用 prompt 模块"）。
+    """
+    max_tokens = settings.max_context_tokens
+    kept: list[RetrievalHit] = []
+    running = 0
+    for hit in hits:
+        line = render_hit(hit)
+        if not line:
+            continue
+        line_tokens = llm.count_tokens(line)
+        if kept and running + line_tokens > max_tokens:
+            break
+        kept.append(hit)
+        running += line_tokens
+        if running >= max_tokens:
+            break
+    return kept
+
+
+# ── 通用辅助 ──────────────────────────────────────────────────────────
 
 
 def _coerce_confidence(raw: str) -> Confidence:
@@ -272,4 +583,16 @@ def _coerce_confidence(raw: str) -> Confidence:
         return Confidence.EXTRACTED
 
 
-__all__ = ["GraphRetriever"]
+#: MultiRetriever 工厂签名（按命令映射构造 retriever 子集，pipeline 注入）
+RetrieverFactory = Callable[[str, nx.MultiDiGraph, LLMClient, Settings], list[Retriever]]
+
+
+__all__ = [
+    "CommunityRetriever",
+    "GraphRetriever",
+    "MultiRetriever",
+    "Retriever",
+    "RetrieverFactory",
+    "VectorRetriever",
+    "fuse",
+]

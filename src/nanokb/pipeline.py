@@ -40,7 +40,7 @@ import logging
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 import networkx as nx  # type: ignore[import-untyped]
 from pydantic import BaseModel, Field
@@ -72,9 +72,16 @@ from nanokb.stage2_extract import build_default_extractor
 from nanokb.stage2_extract.base import Extractor
 from nanokb.stage3_compile import GraphBuilder
 from nanokb.stage4_index import VectorStore, build_indexes
+from nanokb.stage4_index.community import CommunityResult, load_communities
 from nanokb.stage5_qa.generator import generate
 from nanokb.stage5_qa.prompt import compile_context
-from nanokb.stage5_qa.retriever import GraphRetriever
+from nanokb.stage5_qa.retriever import (
+    CommunityRetriever,
+    GraphRetriever,
+    MultiRetriever,
+    Retriever,
+    VectorRetriever,
+)
 from nanokb.stage5_qa.review import should_flag
 from nanokb.utils.io import atomic_write_json, staging_swap
 
@@ -121,6 +128,13 @@ class AnswerQueryResult(BaseModel):
 
 class ColdStartError(RuntimeError):
     """图谱未编译（冷启动，Opt #8）——CLI 应提示并 exit 1。"""
+
+
+#: 问答模式（方案 §3.5.3 命令语义映射）：
+#: - ``query``：graph + vector + community 三路融合（图谱推理问答）。
+#: - ``ask``：仅向量路（语义模糊问答）。
+#: - ``search``：仅社区路（社区宏观检索，``--community``）。
+AnswerMode = Literal["query", "ask", "search"]
 
 
 # ── 向量库后端协议（s1-feat-011 VectorStore 满足） ────────────────────
@@ -453,24 +467,37 @@ def answer_query(
     settings: Settings,
     question: str,
     *,
+    mode: AnswerMode = "query",
     llm: LLMClient | None = None,
     graph: nx.MultiDiGraph | None = None,
+    vector_store: VectorStoreBackend | None = None,
+    communities: CommunityResult | None = None,
 ) -> AnswerQueryResult:
-    """执行 query 问答流程（方案 §3.5.3，阶段 3 仅 graph 路，Opt #5 降级）。
+    """执行问答流程（方案 §3.5.3，按 ``mode`` 启用 retriever 子集）。
+
+    命令语义映射（Opt #5 + s1-feat-012 三路融合）：
+    - ``mode="query"``：graph + vector + community 三路融合（升级 s1-feat-009 的仅 graph 路）。
+    - ``mode="ask"``：仅向量路。
+    - ``mode="search"``：仅社区路（配合 ``search --community``）。
 
     流程：
     1. 冷启动校验（Opt #8）：``out/graph.json`` 不存在或 ``raw/`` 为空 →
-       抛 ``ColdStartError``，CLI 据此 exit 1 并提示用户先 build。
-    2. 加载 graph + retriever.recall：NER → normalize → 查图 → fuzzy → N 跳扩展。
-    3. ``compile_context`` 渲染 hits 为纯文本上下文（tiktoken 裁剪）。
-    4. ``generate`` 生成带 ``^[source_file]`` 引用的 ``Answer``。
-    5. ``should_flag`` 判定是否入 review_queue（写入由 s1-feat-013 接入）。
+       抛 ``ColdStartError``，CLI 据此 exit 1。
+    2. 加载 graph / ChromaDB / communities（按 mode 懒加载所需资源）。
+    3. ``MultiRetriever.recall``：按 mode 启用 retriever 子集 → fuse 融合重排
+       （confidence 权重 × 相似度）→ tiktoken 裁剪。
+    4. ``compile_context`` 渲染 hits 为纯文本上下文。
+    5. ``generate`` 生成带 ``^[source_file]`` 引用的 ``Answer``。
+    6. ``should_flag`` 判定是否入 review_queue（写入由 s1-feat-013 接入）。
 
     Args:
         settings: 全局配置。
         question: 用户自然语言问题。
+        mode: 问答模式（见 ``AnswerMode``）。
         llm: LLM 客户端；``None`` 时经 ``make_llm_client`` 创建（缺 key exit 2）。
         graph: 已加载的图谱；``None`` 时从 ``out/graph.json`` 加载。
+        vector_store: 向量库后端；``None`` 时按 mode 决定是否从 ``out/chroma`` 加载。
+        communities: 社区结果；``None`` 时按 mode 决定是否从 ``out/communities.json`` 加载。
 
     Returns:
         ``AnswerQueryResult`` —— 答案 + 召回命中。
@@ -491,12 +518,143 @@ def answer_query(
     if llm is None:
         llm = make_llm_client(settings)
 
-    retriever = GraphRetriever(graph, llm, settings)
-    hits = retriever.recall(question)
+    retrievers = _build_retrievers_for_mode(
+        mode, graph, llm, settings, vector_store=vector_store, communities=communities
+    )
+    multi = MultiRetriever(retrievers, settings, llm)
+    hits = multi.recall(question)
     context = compile_context(hits, settings, llm)
     answer = generate(question, context, hits, llm, settings)
     answer.review_flagged = should_flag(hits, settings)
     return AnswerQueryResult(answer=answer, hits=hits)
+
+
+def search_communities(
+    settings: Settings,
+    keyword: str,
+    *,
+    llm: LLMClient | None = None,
+    graph: nx.MultiDiGraph | None = None,
+    communities: CommunityResult | None = None,
+) -> list[RetrievalHit]:
+    """``search --community`` 社区宏观检索（方案 §3.5.3，s1-feat-012 AC #3）。
+
+    流程：
+    1. 冷启动校验。
+    2. 加载 communities.json（缺失时抛 ``ColdStartError`` 并提示先 build）。
+    3. ``CommunityRetriever.recall(keyword)``：NER → 社区成员匹配 → 命中社区摘要 hit。
+
+    Args:
+        settings: 全局配置。
+        keyword: 检索关键词（如 ``'深度学习'``）。
+        llm: LLM 客户端；``None`` 时经 ``make_llm_client`` 创建。
+        graph: 已加载图谱；``None`` 时从 ``out/graph.json`` 加载。
+        communities: 社区结果；``None`` 时从 ``out/communities.json`` 加载。
+
+    Returns:
+        命中的 ``RetrievalHit`` 列表（携带 ``community_summary``）；无命中返回空。
+
+    Raises:
+        ColdStartError: 图谱未编译或社区索引缺失。
+    """
+    if _is_cold_start(settings):
+        raise ColdStartError("知识库未编译，请先运行 nanokb build")
+
+    if communities is None:
+        communities = load_communities(settings.out_dir)
+    if communities is None or not communities.communities:
+        raise ColdStartError(
+            "社区索引未编译，请先运行 nanokb build 完成高级索引"
+        )
+
+    if graph is None:
+        graph = _load_graph(settings.out_dir)
+    if llm is None:
+        llm = make_llm_client(settings)
+
+    retriever = CommunityRetriever(communities, graph, llm, settings)
+    return retriever.recall(keyword)
+
+
+def _build_retrievers_for_mode(
+    mode: AnswerMode,
+    graph: nx.MultiDiGraph,
+    llm: LLMClient,
+    settings: Settings,
+    *,
+    vector_store: VectorStoreBackend | object | None = None,
+    communities: CommunityResult | None = None,
+) -> list[Retriever]:
+    """按命令映射启用 retriever 子集（Opt #5 + s1-feat-012）。
+
+    - ``ask``：仅 ``VectorRetriever``（缺失向量库时返回空，上游据此提示用户）。
+    - ``search``：仅 ``CommunityRetriever``（缺失社区时返回空）。
+    - ``query``：``GraphRetriever`` 始终启用；``enable_vector_recall`` 且向量库就绪
+      时加 ``VectorRetriever``；``enable_community_recall`` 且社区就绪时加
+      ``CommunityRetriever``（升级 s1-feat-009 的仅 graph 路为三路融合）。
+    """
+    if mode == "ask":
+        vs = _ensure_vector_store(settings, llm, vector_store)
+        if vs is None:
+            logger.warning("ask: vector store unavailable; returning empty retrievers")
+            return []
+        return [VectorRetriever(vs, llm, settings)]
+
+    if mode == "search":
+        comm = communities if communities is not None else load_communities(settings.out_dir)
+        if comm is None or not comm.communities:
+            logger.warning("search: communities unavailable; returning empty retrievers")
+            return []
+        return [CommunityRetriever(comm, graph, llm, settings)]
+
+    # mode == "query"：三路融合
+    retrievers: list[Retriever] = [GraphRetriever(graph, llm, settings)]
+    if settings.enable_vector_recall:
+        vs = _ensure_vector_store(settings, llm, vector_store)
+        if vs is not None:
+            retrievers.append(VectorRetriever(vs, llm, settings))
+    if settings.enable_community_recall:
+        comm = communities if communities is not None else load_communities(settings.out_dir)
+        if comm is not None and comm.communities:
+            retrievers.append(CommunityRetriever(comm, graph, llm, settings))
+    return retrievers
+
+
+def _ensure_vector_store(
+    settings: Settings,
+    llm: LLMClient,
+    explicit: VectorStoreBackend | object | None,
+) -> VectorStore | None:
+    """加载或复用 ``VectorStore``；不可用（chroma 目录不存在）返回 None。
+
+    优先复用调用方传入的 ``explicit``（测试注入），否则从 ``out/chroma`` 加载真实
+    ``VectorStore``。embedding_dim 从 manifest FileState 推断（取已记录维度的众数），
+    缺失时降级用 ``_probe_embedding_dim`` 探测。
+    """
+    if explicit is not None:
+        # 测试注入的 FakeVectorStore 无 search 方法，仅 query 模式下真实 VectorStore 才走
+        # VectorRetriever；此处保留传参以便未来扩展，但 VectorRetriever 需要真实 search。
+        if isinstance(explicit, VectorStore):
+            return explicit
+        # 非 VectorStore（如测试 FakeVectorStore）—— search 不可用，跳过向量路
+        logger.debug("explicit vector_store is not VectorStore; skipping vector recall")
+        return None
+
+    chroma_path = settings.out_dir / "chroma"
+    if not chroma_path.exists():
+        return None
+    try:
+        manifest = _load_manifest(settings.out_dir)
+        dims = [fs.embedding_dim for fs in manifest.files.values() if fs.embedding_dim]
+        embedding_dim = dims[0] if dims else _probe_embedding_dim(llm)
+        return VectorStore(chroma_path, settings.embedding_model, embedding_dim)
+    except Exception:
+        logger.warning(
+            "failed to load vector store; vector recall disabled",
+            exc_info=True,
+            extra={"stage": "qa-retriever"},
+        )
+        return None
 
 
 # ── 辅助函数 ──────────────────────────────────────────────────────────
@@ -749,6 +907,7 @@ def _probe_embedding_dim(llm: LLMClient) -> int:
 __all__ = [
     "SCHEMA_VERSION",
     "TRIPLES_FILENAME",
+    "AnswerMode",
     "AnswerQueryResult",
     "ColdStartError",
     "CompileResult",
@@ -758,4 +917,5 @@ __all__ = [
     "build_default_registry",
     "compile",
     "replay",
+    "search_communities",
 ]

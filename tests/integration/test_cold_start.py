@@ -110,11 +110,15 @@ def test_missing_raw_dir_cold_start(tmp_path: Path) -> None:
         pipeline.answer_query(settings, "q", llm=_StubLLM())
 
 
-# ── ask/search 打桩不受冷启动影响 ────────────────────────────────────
+# ── ask/search 真实接入后同样走冷启动校验（s1-feat-012 移除打桩） ──────
 
 
-def test_ask_stub_does_not_trigger_cold_start(tmp_path: Path) -> None:
-    """ask/search 为阶段 3 打桩，无需 build，不抛 ColdStartError。"""
+def test_ask_without_build_triggers_cold_start(tmp_path: Path) -> None:
+    """s1-feat-012：ask 移除打桩接入真实 retriever，未 build → ColdStartError exit 1。
+
+    旧打桩（s1-feat-009）下 ask/search 不需要 build；三路融合接入后 ask 走向量路，
+    受 answer_query 冷启动校验保护，与 query 一致。
+    """
     out_dir = tmp_path / "out"
     out_dir.mkdir()
     result = runner.invoke(
@@ -125,23 +129,24 @@ def test_ask_stub_does_not_trigger_cold_start(tmp_path: Path) -> None:
             "NANOKB_OUT_DIR": str(out_dir),
         },
     )
-    assert result.exit_code == 0
-    assert "该命令需先完成阶段4" in result.stdout
+    assert result.exit_code == 1
+    assert "未编译" in result.stdout or "build" in result.stdout
 
 
-def test_search_stub_does_not_trigger_cold_start(tmp_path: Path) -> None:
+def test_search_without_build_triggers_cold_start(tmp_path: Path) -> None:
+    """s1-feat-012：search --community 接入真实社区检索，未 build → ColdStartError exit 1。"""
     out_dir = tmp_path / "out"
     out_dir.mkdir()
     result = runner.invoke(
         app,
-        ["search", "kw"],
+        ["search", "kw", "--community"],
         env={
             "NANOKB_RAW_DIR": str(tmp_path / "no-raw"),
             "NANOKB_OUT_DIR": str(out_dir),
         },
     )
-    assert result.exit_code == 0
-    assert "该命令需先完成阶段4" in result.stdout
+    assert result.exit_code == 1
+    assert "未编译" in result.stdout or "build" in result.stdout
 
 
 # ── 辅助 ─────────────────────────────────────────────────────────────

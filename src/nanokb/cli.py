@@ -1,9 +1,9 @@
 """Nano KB CLI —— typer 命令（方案 §3.1 + §3.5.3）。
 
 六个子命令：build / query / ask / search / status / review。
-build 接入编译流水线（Feature s1-feat-008）；query 接入图路问答
-（Feature s1-feat-009，Opt #5 v3 降级：仅 graph 路）；ask/search 为阶段 3 打桩
-（Opt #5 v3，阶段 4 s1-feat-012 接入真实 retriever）；review 待 s1-feat-013 接入。
+build 接入编译流水线（Feature s1-feat-008，``--watch`` 接入 s1-feat-004 queue 模型）；
+query/ask/search 接入三路召回问答（Feature s1-feat-012：
+query=三路融合 / ask=仅向量 / search=仅社区）；review 待 s1-feat-013 接入。
 """
 
 from __future__ import annotations
@@ -146,11 +146,11 @@ def build(
 def query(
     question: str = typer.Argument(..., help="自然语言问题。"),
 ) -> None:
-    """图谱推理问答（三路召回融合；阶段 3 仅 graph 路，Opt #5 降级）。"""
+    """图谱推理问答（graph + vector + community 三路召回融合）。"""
     settings = _load_settings()
     setup_logging(settings.out_dir)
     try:
-        result = pipeline.answer_query(settings, question)
+        result = pipeline.answer_query(settings, question, mode="query")
     except pipeline.ColdStartError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from exc
@@ -178,22 +178,61 @@ def query(
 def ask(
     question: str = typer.Argument(..., help="自然语言问题。"),
 ) -> None:
-    """向量路语义问答（阶段 3 打桩，Opt #5 v3；阶段 4 s1-feat-012 补全）。"""
-    console.print(
-        "该命令需先完成阶段4（向量索引）后接入。请先运行 nanokb build 完成高级索引。"
-    )
+    """向量路语义问答（仅向量召回，适合模糊语义匹配）。"""
+    settings = _load_settings()
+    setup_logging(settings.out_dir)
+    try:
+        result = pipeline.answer_query(settings, question, mode="ask")
+    except pipeline.ColdStartError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+
+    answer = result.answer
+    console.print(answer.text)
+
+    if answer.citations:
+        unique = []
+        seen_cite: set[str] = set()
+        for cite in answer.citations:
+            if cite not in seen_cite:
+                seen_cite.add(cite)
+                unique.append(cite)
+        console.print(f"\n[dim]引用来源：{', '.join(unique)}[/dim]")
 
 
 @app.command()
 def search(
     keyword: str = typer.Argument(..., help="检索关键词。"),
-    community: bool = typer.Option(False, "--community", help="社区宏观检索。"),
+    community: bool = typer.Option(
+        False, "--community", help="社区宏观检索（返回所属社区摘要）。"
+    ),
 ) -> None:
-    """社区路宏观检索（阶段 3 打桩，Opt #5 v3；阶段 4 s1-feat-012 补全）。"""
-    _ = community  # 阶段 4 s1-feat-012 接入社区检索时消费
-    console.print(
-        "该命令需先完成阶段4（社区索引）后接入。请先运行 nanokb build 完成高级索引。"
-    )
+    """社区路宏观检索（按关键词返回所属社区摘要）。
+
+    ``--community`` 显式启用社区检索（与方案 §3.5.3 命令映射一致：search=仅社区路）。
+    缺失社区索引时提示先 ``nanokb build``。
+    """
+    settings = _load_settings()
+    setup_logging(settings.out_dir)
+    _ = community  # search 命令始终走社区路（命令映射固定），flag 保留作显式提示
+    try:
+        hits = pipeline.search_communities(settings, keyword)
+    except pipeline.ColdStartError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+
+    if not hits:
+        console.print(f"[yellow]未找到与 '{keyword}' 相关的社区[/yellow]")
+        return
+
+    console.print(f"[green]找到 {len(hits)} 个相关社区：[/green]")
+    for hit in hits:
+        summary = hit.community_summary or "(无摘要)"
+        source = hit.concept.source_file if hit.concept else ""
+        line = f"- {summary}"
+        if source:
+            line += f" (来源:{source})"
+        console.print(line)
 
 
 @app.command()
