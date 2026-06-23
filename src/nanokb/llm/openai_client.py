@@ -3,15 +3,25 @@
 complete 走原生 response_format={"type":"json_object"} JSON mode；
 embed 走 OpenAI embeddings API；
 count_tokens 用 tiktoken.encoding_for_model 精确计数（未知模型降级 cl100k_base）。
+
+速率限制（三重防护）：
+1. SDK 内置 ``max_retries`` 指数退避（429/5xx 自动重试）；
+2. 应用层 ``RateLimitError`` 补充重试（SDK 重试耗尽后再退避重试）；
+3. 请求间最小间隔节流（``request_interval``），控制 RPM 避免触发限额。
 """
 
 from __future__ import annotations
 
+import logging
+import time
+
 import tiktoken
-from openai import OpenAI
+from openai import OpenAI, RateLimitError
 from openai.types.chat import ChatCompletionMessageParam
 
 from nanokb.llm.base import ResponseFormat
+
+logger = logging.getLogger("nanokb")
 
 
 class OpenAIClient:
@@ -23,15 +33,21 @@ class OpenAIClient:
         model: str,
         embedding_model: str,
         base_url: str | None = None,
+        max_retries: int = 6,
+        request_interval: float = 0.0,
+        rate_limit_retries: int = 3,
     ) -> None:
         # 仅在显式指定 base_url 时透传，未指定时由 SDK 读 OPENAI_BASE_URL 环境变量或用默认端点
         self._client = (
-            OpenAI(api_key=api_key, base_url=base_url)
+            OpenAI(api_key=api_key, base_url=base_url, max_retries=max_retries)
             if base_url
-            else OpenAI(api_key=api_key)
+            else OpenAI(api_key=api_key, max_retries=max_retries)
         )
         self._model = model
         self._embedding_model = embedding_model
+        self._request_interval = request_interval
+        self._rate_limit_retries = rate_limit_retries
+        self._last_call_ts: float | None = None
         # 懒加载：避免构造期触发 tiktoken BPE 文件下载（离线/无缓存环境下构造仍可用）
         self._encoding: tiktoken.Encoding | None = None
 
@@ -42,6 +58,28 @@ class OpenAIClient:
             except KeyError:
                 self._encoding = tiktoken.get_encoding("cl100k_base")
         return self._encoding
+
+    def _throttle(self) -> None:
+        """确保两次 API 调用间至少间隔 ``request_interval`` 秒。"""
+        if self._request_interval <= 0:
+            return
+        now = time.monotonic()
+        if self._last_call_ts is not None:
+            elapsed = now - self._last_call_ts
+            wait = self._request_interval - elapsed
+            if wait > 0:
+                logger.debug("throttling: sleeping %.2fs before next call", wait)
+                time.sleep(wait)
+                now = time.monotonic()
+        self._last_call_ts = now
+
+    @staticmethod
+    def _compute_backoff(attempt: int) -> float:
+        """指数退避：10s, 20s, 40s ...（上限 120s）。
+
+        SDK 重试耗尽说明限流窗口未恢复，需要更长等待。
+        """
+        return float(min(10.0 * (2**attempt), 120.0))
 
     def complete(
         self,
@@ -54,24 +92,49 @@ class OpenAIClient:
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ]
-        if response_format == "json":
-            resp = self._client.chat.completions.create(
-                model=self._model,
-                messages=messages,
-                temperature=temperature,
-                response_format={"type": "json_object"},
-            )
-        else:
-            resp = self._client.chat.completions.create(
-                model=self._model,
-                messages=messages,
-                temperature=temperature,
-            )
-        return resp.choices[0].message.content or ""
+        use_json = response_format == "json"
+
+        total_attempts = self._rate_limit_retries + 1
+        for attempt in range(total_attempts):
+            self._throttle()
+            try:
+                if use_json:
+                    resp = self._client.chat.completions.create(
+                        model=self._model,
+                        messages=messages,
+                        temperature=temperature,
+                        response_format={"type": "json_object"},
+                    )
+                else:
+                    resp = self._client.chat.completions.create(
+                        model=self._model,
+                        messages=messages,
+                        temperature=temperature,
+                    )
+            except RateLimitError:
+                if attempt >= self._rate_limit_retries:
+                    logger.error(
+                        "rate limit exhausted after %d app-level retries",
+                        self._rate_limit_retries,
+                    )
+                    raise
+                backoff = self._compute_backoff(attempt)
+                logger.warning(
+                    "rate limited (attempt %d/%d), backing off %.1fs",
+                    attempt + 1,
+                    total_attempts,
+                    backoff,
+                )
+                time.sleep(backoff)
+                continue
+            return resp.choices[0].message.content or ""
+
+        raise RuntimeError("unreachable")  # pragma: no cover
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
+        self._throttle()
         resp = self._client.embeddings.create(
             model=self._embedding_model,
             input=texts,

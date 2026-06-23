@@ -217,9 +217,18 @@ def compile(  # noqa: A001  — 故意与内建同名，方案 §3.5.1 指定
         logger.info("no changes detected; skipping compilation")
         return CompileResult(changes=changes)
 
+    to_process_preview = sorted(set(changes.added) | set(changes.modified))
+    logger.info(
+        "changes detected: %d added, %d modified, %d deleted — %d file(s) to extract",
+        len(changes.added), len(changes.modified), len(changes.deleted),
+        len(to_process_preview),
+        extra={"stage": "compile-detect"},
+    )
+
     if llm is None:
         llm = make_llm_client(settings)
 
+    logger.info("probing embedding dimensions...", extra={"stage": "compile-probe"})
     # s1-feat-011: 向量库后端。vector_store=None 时自动构造真实 ChromaDB VectorStore，
     # 使 CLI build 端到端产出向量。探测 embedding 维度保证 VectorStore 元数据与 llm.embed
     # 实际输出维度一致（Medium #7 维度校验依赖此一致性）。
@@ -244,8 +253,13 @@ def compile(  # noqa: A001  — 故意与内建同名，方案 §3.5.1 指定
     skipped: list[str] = []
 
     to_process = sorted(set(changes.added) | set(changes.modified))
-    for path in to_process:
+    total = len(to_process)
+    for idx, path in enumerate(to_process, 1):
         abs_path = raw_dir / path
+        logger.info(
+            "[%d/%d] ingesting %s ...", idx, total, path,
+            extra={"stage": "compile-ingest", "file": path},
+        )
         try:
             doc = ingest_file(abs_path, raw_dir, registry, settings)
         except UnsupportedFormatError as exc:
@@ -275,6 +289,11 @@ def compile(  # noqa: A001  — 故意与内建同名，方案 §3.5.1 指定
 
         results_map[path] = _normalize_result_source(result, path)
         sha_map[path] = doc.sha256
+        logger.info(
+            "[%d/%d] extracted %s → %d triples, %d concepts",
+            idx, total, path, len(result.triples), len(result.concepts),
+            extra={"stage": "compile-extract", "file": path},
+        )
 
     # ── 阶段 B：破坏性变更（抽取全部成功后统一执行） ──────────────────
 
@@ -300,6 +319,10 @@ def compile(  # noqa: A001  — 故意与内建同名，方案 §3.5.1 指定
             vector_store.delete_by_source(path)
 
     # step 5: added/modified 图构建（无向量，v4 拆分独立小阶段）
+    logger.info(
+        "building graph from %d file(s)...", len(results_map),
+        extra={"stage": "compile-graph"},
+    )
     for path in to_process:
         if path not in results_map:
             continue
@@ -321,6 +344,10 @@ def compile(  # noqa: A001  — 故意与内建同名，方案 §3.5.1 指定
 
     # step 7: 向量索引（v4 新增独立步骤）——逐 path 子图，描述已就绪
     if vector_store is not None:
+        logger.info(
+            "indexing vectors (embedding model: %s)...", settings.embedding_model,
+            extra={"stage": "compile-vector"},
+        )
         for path in to_process:
             if path not in results_map:
                 continue
@@ -345,6 +372,10 @@ def compile(  # noqa: A001  — 故意与内建同名，方案 §3.5.1 指定
         )
 
     # step 10-11: 序列化到 staging + 原子切换（manifest 最后写）
+    logger.info(
+        "building community + keyword indexes, writing to disk...",
+        extra={"stage": "compile-finalize"},
+    )
     # llm=None: 社区摘要用启发式（成员名拼接，零 Token），避免给已有 LLM 调用计数
     # 断言的集成测试引入额外 complete 调用。社区 LLM 摘要可经 detect_communities
     # 直接调用时启用（llm 非 None），或后续 feature 增设开关接入。

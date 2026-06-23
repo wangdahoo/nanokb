@@ -120,6 +120,9 @@ def make_llm_client(settings: Settings) -> LLMClient:
             model=settings.llm_model,
             embedding_model=settings.embedding_model,
             base_url=settings.openai_base_url,
+            max_retries=settings.llm_max_retries,
+            request_interval=settings.llm_request_interval,
+            rate_limit_retries=settings.llm_rate_limit_retries,
         )
 
     if provider == "anthropic":

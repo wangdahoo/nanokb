@@ -118,7 +118,11 @@ class SemanticTrack:
         # 按 chunk_index 升序处理，保证 last-write-wins 语义确定可复现。
         ordered_chunks = sorted(doc.chunks, key=lambda c: c.index)
 
-        for chunk in ordered_chunks:
+        total_chunks = len(ordered_chunks)
+        for ci, chunk in enumerate(ordered_chunks, 1):
+            logger.info(
+                "  chunk %d/%d of %s ...", ci, total_chunks, doc.path.name,
+            )
             parsed = self._extract_chunk_with_retry(chunk)
             if parsed is None:
                 # Medium #4：解析仍失败 → AMBIGUOUS 哨兵，不崩溃

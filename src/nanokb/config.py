@@ -53,6 +53,11 @@ class Settings(BaseSettings):
     anthropic_api_key: SecretStr | None = None
     ollama_base_url: str = "http://localhost:11434"
 
+    # ── LLM 速率限制 ────────────────────────────────────────────────
+    llm_max_retries: int = 6  # SDK 内置重试次数（429/5xx 自动指数退避）
+    llm_request_interval: float = 0.0  # 请求间最小间隔秒数（0=不限速）
+    llm_rate_limit_retries: int = 3  # SDK 重试耗尽后的应用层 429 补充重试
+
     # ── Embedding ───────────────────────────────────────────────────
     embedding_provider: Literal["openai", "ollama"] = "openai"
     embedding_model: str = "text-embedding-3-small"
