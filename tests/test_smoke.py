@@ -80,7 +80,7 @@ def test_all_models_are_importable() -> None:
 def test_settings_defaults() -> None:
     settings = Settings()
     assert settings.llm_provider == "openai"
-    assert settings.llm_model == "gpt-4o-mini"
+    assert settings.llm_model == "glm-5.1"
     assert settings.chunk_max_tokens == 3000
     assert settings.chunk_overlap_tokens == 200
     assert settings.code_languages == ["python", "javascript", "java"]

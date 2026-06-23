@@ -32,7 +32,7 @@ class Settings(BaseSettings):
 
     # ── LLM ─────────────────────────────────────────────────────────
     llm_provider: Literal["openai", "anthropic", "ollama"] = "openai"
-    llm_model: str = "gpt-4o-mini"
+    llm_model: str = "glm-5.1"
     openai_api_key: SecretStr | None = None
     anthropic_api_key: SecretStr | None = None
     ollama_base_url: str = "http://localhost:11434"
