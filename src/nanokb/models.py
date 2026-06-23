@@ -77,15 +77,26 @@ class Document(BaseModel):
 
 
 class FileState(BaseModel):
-    """manifest 中单个文件的增量状态（含模型身份，Medium #7）。"""
+    """manifest 中单个文件的增量状态（含模型身份，Medium #7）。
+
+    三层签名字段（``extraction_config`` / ``index_config`` / ``embedding_config``）
+    来自 ``nanokb.config_signature``，供 detector 五维身份比对使用。default ``""``
+    保证旧 manifest 反序列化不报错（零迁移）：``""`` ≠ 计算签名 → 首次 compile
+    全量 modified 自愈。
+    """
 
     path: str
     sha256: str
     processed_at: str
+    # 旧字段（保留，供调试 / VectorStore / 向后兼容）
     extractor_version: str = "1"
     llm_model: str = ""
     embedding_model: str = ""
     embedding_dim: int = 0
+    # 新增三层签名（detector 比对用；default "" → 旧 manifest 触发全量 modified）
+    extraction_config: str = ""
+    index_config: str = ""
+    embedding_config: str = ""
 
 
 class Manifest(BaseModel):
