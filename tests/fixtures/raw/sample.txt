@@ -1,0 +1,4 @@
+Attention Is All You Need 摘要
+
+本文提出 Transformer 架构，摒弃循环与卷积，完全基于注意力机制。
+Self-Attention 是 Transformer 的核心运算单元。
