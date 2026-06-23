@@ -1,19 +1,25 @@
-"""Nano KB CLI —— typer 命令骨架。
+"""Nano KB CLI —— typer 命令（方案 §3.1 + §3.5.3）。
 
-六个子命令（方案 §3.1）：build / query / ask / search / status / review。
-Phase 0 仅 status 完整可用，其余命令打桩（后续 feature 接入真实流水线）。
+六个子命令：build / query / ask / search / status / review。
+build 已接入流水线（Feature s1-feat-008）；query/ask/search/review 仍为打桩
+（后续 feature 接入问答与主动学习闭环）。
 """
 
 from __future__ import annotations
 
+import logging
+import time
 from collections.abc import Iterable
 from pathlib import Path
 
 import typer
 from rich.console import Console
 
+from nanokb import pipeline
 from nanokb.config import Settings
+from nanokb.llm.base import make_llm_client
 from nanokb.logging_setup import setup_logging
+from nanokb.stage1_load.detector import start_watch
 
 app = typer.Typer(
     name="nanokb",
@@ -22,6 +28,7 @@ app = typer.Typer(
     add_completion=False,
 )
 console = Console()
+logger = logging.getLogger("nanokb")
 
 # 知识库支持的文档扩展名（用于 status 统计）
 _SUPPORTED_SUFFIXES = frozenset({".md", ".txt", ".pdf", ".docx", ".py", ".js", ".java"})
@@ -52,6 +59,59 @@ def _iter_documents(raw_dir: Path) -> Iterable[Path]:
     )
 
 
+def _print_compile_summary(result: pipeline.CompileResult) -> None:
+    """打印编译结果摘要。"""
+    ch = result.changes
+    parts: list[str] = [
+        f"added={len(ch.added)}",
+        f"modified={len(ch.modified)}",
+        f"deleted={len(ch.deleted)}",
+        f"extracted={result.extracted_count}",
+    ]
+    if result.skipped:
+        parts.append(f"skipped={len(result.skipped)}")
+    if result.synthesized_fallback_count:
+        parts.append(f"fallback={result.synthesized_fallback_count}")
+    console.print(f"[green]编译完成：{', '.join(parts)}[/green]")
+
+
+def _run_watch(settings: Settings, *, force: bool) -> None:
+    """启动 watch 模式：首次编译后监听 raw/ 变更，debounce 后增量编译。
+
+    使用 s1-feat-004 的 watchdog queue 模型（回调入队 + 单 worker 串行消费）。
+    """
+    raw_dir = settings.raw_dir
+    if not raw_dir.exists():
+        console.print(f"[red]raw/ 目录不存在：{raw_dir}[/red]")
+        raise typer.Exit(code=1)
+
+    llm = make_llm_client(settings)
+    registry = pipeline.build_default_registry()
+
+    result = pipeline.compile(settings, llm=llm, registry=registry, force=force)
+    _print_compile_summary(result)
+
+    console.print("\n[green]Watch 模式已启动（Ctrl-C 退出）...[/green]")
+
+    def on_change(path: str) -> None:
+        console.print(f"[dim]检测到变更：{path}，正在增量编译...[/dim]")
+        try:
+            res = pipeline.compile(settings, llm=llm, registry=registry)
+            _print_compile_summary(res)
+        except Exception:
+            logger.exception("watch compile failed", extra={"stage": "watch", "file": path})
+
+    ctx = start_watch(raw_dir, on_change=on_change)
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        ctx.stop()
+        console.print("[green]Watch 已停止。[/green]")
+
+
 @app.command()
 def build(
     watch: bool = typer.Option(False, "--watch", help="监听 raw/ 变更，自动增量编译。"),
@@ -61,10 +121,24 @@ def build(
     """编译知识库（增量检测 → 双轨抽取 → 图谱融合 → 索引）。"""
     settings = _load_settings()
     setup_logging(settings.out_dir)
-    console.print(
-        "[yellow]build 命令尚未接入流水线（Phase 0 骨架）。"
-        f"选项：watch={watch}, force={force}, replay={replay}[/yellow]"
-    )
+
+    if replay:
+        replay_result = pipeline.replay(settings)
+        if not replay_result.rebuilt_files and not replay_result.deleted_files:
+            console.print("[yellow]无可重放记录（triples.jsonl 为空或不存在）[/yellow]")
+        else:
+            console.print(
+                f"[green]重放完成：重建 {len(replay_result.rebuilt_files)} 个文件，"
+                f"跳过 {len(replay_result.deleted_files)} 个已删除文件[/green]"
+            )
+        return
+
+    if watch:
+        _run_watch(settings, force=force)
+        return
+
+    result = pipeline.compile(settings, force=force)
+    _print_compile_summary(result)
 
 
 @app.command()
