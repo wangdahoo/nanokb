@@ -45,8 +45,19 @@ from typing import Any, Literal, Protocol, runtime_checkable
 import networkx as nx  # type: ignore[import-untyped]
 from pydantic import BaseModel, Field
 
+from nanokb.compile import GraphBuilder
 from nanokb.config import Settings
+from nanokb.extract import build_default_extractor
+from nanokb.extract.base import Extractor
+from nanokb.index import VectorStore, build_indexes
+from nanokb.index.community import CommunityResult, load_communities
 from nanokb.llm.base import LLMClient, make_llm_client
+from nanokb.load.detector import (
+    SUPPORTED_SUFFIXES,
+    ChangeSet,
+    detect_changes,
+)
+from nanokb.load.ingest import ingest_file
 from nanokb.loaders import (
     CodeLoader,
     LoaderRegistry,
@@ -62,27 +73,16 @@ from nanokb.models import (
     RetrievalHit,
     Triple,
 )
-from nanokb.stage1_load.detector import (
-    SUPPORTED_SUFFIXES,
-    ChangeSet,
-    detect_changes,
-)
-from nanokb.stage1_load.ingest import ingest_file
-from nanokb.stage2_extract import build_default_extractor
-from nanokb.stage2_extract.base import Extractor
-from nanokb.stage3_compile import GraphBuilder
-from nanokb.stage4_index import VectorStore, build_indexes
-from nanokb.stage4_index.community import CommunityResult, load_communities
-from nanokb.stage5_qa.generator import generate
-from nanokb.stage5_qa.prompt import compile_context
-from nanokb.stage5_qa.retriever import (
+from nanokb.qa.generator import generate
+from nanokb.qa.prompt import compile_context
+from nanokb.qa.retriever import (
     CommunityRetriever,
     GraphRetriever,
     MultiRetriever,
     Retriever,
     VectorRetriever,
 )
-from nanokb.stage5_qa.review import (
+from nanokb.qa.review import (
     ReviewQueue,
     collect_entities,
     determine_reason,

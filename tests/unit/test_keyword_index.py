@@ -18,7 +18,7 @@ from pathlib import Path
 
 import networkx as nx
 
-from nanokb.stage4_index.keyword_index import (
+from nanokb.index.keyword_index import (
     KEYWORDS_FILENAME,
     KeywordEntry,
     build,

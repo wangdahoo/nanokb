@@ -23,10 +23,10 @@ from typing import Any
 import networkx as nx
 
 from nanokb.config import Settings
+from nanokb.index.community import Community, CommunityResult
+from nanokb.index.vector_store import VectorStore
 from nanokb.models import Concept, Confidence, RetrievalHit, Triple
-from nanokb.stage4_index.community import Community, CommunityResult
-from nanokb.stage4_index.vector_store import VectorStore
-from nanokb.stage5_qa.retriever import (
+from nanokb.qa.retriever import (
     CommunityRetriever,
     GraphRetriever,
     MultiRetriever,

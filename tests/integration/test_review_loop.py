@@ -21,7 +21,7 @@ from typer.testing import CliRunner
 from nanokb import pipeline
 from nanokb.cli import app
 from nanokb.config import Settings
-from nanokb.stage5_qa.review import REVIEW_QUEUE_FILENAME, ReviewQueue
+from nanokb.qa.review import REVIEW_QUEUE_FILENAME, ReviewQueue
 
 runner = CliRunner()
 

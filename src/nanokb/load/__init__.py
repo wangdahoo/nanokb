@@ -1,4 +1,4 @@
-"""stage1_load —— 增量检测 + 文档加载编排阶段包。
+"""load —— 增量检测 + 文档加载编排阶段包。
 
 导出（s1-feat-004）：
 - ``detector.detect_changes``：比对 manifest 四维身份返回 ChangeSet（added/modified/deleted）
@@ -13,7 +13,7 @@
 
 from __future__ import annotations
 
-from nanokb.stage1_load.detector import (
+from nanokb.load.detector import (
     DEBOUNCE_SECONDS,
     SUPPORTED_SUFFIXES,
     ChangeSet,
@@ -22,7 +22,7 @@ from nanokb.stage1_load.detector import (
     detect_changes,
     start_watch,
 )
-from nanokb.stage1_load.ingest import IngestResult, ingest, ingest_file
+from nanokb.load.ingest import IngestResult, ingest, ingest_file
 
 __all__ = [
     "DEBOUNCE_SECONDS",

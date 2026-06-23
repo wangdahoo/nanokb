@@ -1,4 +1,4 @@
-"""``stage5_qa.prompt`` 单测（方案 §3.5.3 step 5，Feature s1-feat-009）。
+"""``qa.prompt`` 单测（方案 §3.5.3 step 5，Feature s1-feat-009）。
 
 覆盖：
 - 空 hits → 空 context（generator 据此返回 "未找到相关知识点"）。
@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from nanokb.config import Settings
 from nanokb.models import Concept, Confidence, RetrievalHit, Triple
-from nanokb.stage5_qa.prompt import compile_context, render_hit
+from nanokb.qa.prompt import compile_context, render_hit
 
 
 class FakeLLMClient:

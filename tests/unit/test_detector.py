@@ -16,9 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from nanokb.config import Settings
-from nanokb.loaders import LoaderRegistry, UnstructuredLoader
-from nanokb.models import FileState, Manifest
-from nanokb.stage1_load import (
+from nanokb.load import (
     ChangeSet,
     IngestResult,
     WatchQueue,
@@ -27,6 +25,8 @@ from nanokb.stage1_load import (
     ingest_file,
     start_watch,
 )
+from nanokb.loaders import LoaderRegistry, UnstructuredLoader
+from nanokb.models import FileState, Manifest
 from nanokb.utils.hashing import sha256_file
 
 # --------------------------------------------------------------------------- #

@@ -16,10 +16,10 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from nanokb.config import Settings
+from nanokb.extract.chunker import chunk_text
+from nanokb.load.detector import ChangeSet, _rel_key, detect_changes
 from nanokb.loaders import LoaderRegistry, UnsupportedFormatError
 from nanokb.models import Document, Manifest
-from nanokb.stage1_load.detector import ChangeSet, _rel_key, detect_changes
-from nanokb.stage2_extract.chunker import chunk_text
 from nanokb.utils.hashing import sha256_file
 
 logger = logging.getLogger("nanokb")

@@ -12,8 +12,8 @@ from __future__ import annotations
 
 import pytest
 
+from nanokb.extract import chunk_text
 from nanokb.models import Chunk
-from nanokb.stage2_extract import chunk_text
 from nanokb.utils.tokenize import count_tokens
 
 # 使用 cl100k_base 兜底的默认 model（离线可用）

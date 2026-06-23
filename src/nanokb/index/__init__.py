@@ -23,25 +23,25 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from nanokb.config import Settings
-from nanokb.stage4_index.community import (
+from nanokb.index.community import (
     COMMUNITIES_FILENAME,
     Community,
     CommunityResult,
     detect_communities,
     load_communities,
 )
-from nanokb.stage4_index.keyword_index import (
+from nanokb.index.keyword_index import (
     KEYWORDS_FILENAME,
     KeywordEntry,
     KeywordIndex,
 )
-from nanokb.stage4_index.keyword_index import (
+from nanokb.index.keyword_index import (
     build as build_keyword_index,
 )
-from nanokb.stage4_index.keyword_index import (
+from nanokb.index.keyword_index import (
     load as load_keyword_index,
 )
-from nanokb.stage4_index.vector_store import (
+from nanokb.index.vector_store import (
     COLLECTION_NAME,
     DEFAULT_SEARCH_K,
     VectorStore,

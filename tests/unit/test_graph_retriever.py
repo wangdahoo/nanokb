@@ -1,4 +1,4 @@
-"""``stage5_qa.retriever.GraphRetriever`` 单测（方案 §3.5.3 step 3-4，Feature s1-feat-009）。
+"""``qa.retriever.GraphRetriever`` 单测（方案 §3.5.3 step 3-4，Feature s1-feat-009）。
 
 覆盖：
 - AC #3：实体大小写不一致（``transformer`` vs 图节点 ``Transformer``）经 normalize 命中。
@@ -19,7 +19,7 @@ from typing import Any
 import networkx as nx
 
 from nanokb.config import Settings
-from nanokb.stage5_qa.retriever import GraphRetriever
+from nanokb.qa.retriever import GraphRetriever
 
 
 class FakeLLMClient:

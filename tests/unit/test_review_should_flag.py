@@ -1,4 +1,4 @@
-"""``stage5_qa.review.should_flag`` 单测（方案 §3.5.3 step 7，Medium #2，Feature s1-feat-009）。
+"""``qa.review.should_flag`` 单测（方案 §3.5.3 step 7，Medium #2，Feature s1-feat-009）。
 
 覆盖 OR 触发逻辑：
 - ``len(hits) < min_hit_count`` → True（低召回）。
@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from nanokb.config import Settings
 from nanokb.models import Confidence, RetrievalHit, Triple
-from nanokb.stage5_qa.review import should_flag
+from nanokb.qa.review import should_flag
 
 
 def _hit(score: float, confidence: Confidence = Confidence.EXTRACTED) -> RetrievalHit:

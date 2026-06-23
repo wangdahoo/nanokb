@@ -24,7 +24,7 @@ from typing import Any
 
 from nanokb import pipeline
 from nanokb.config import Settings
-from nanokb.stage1_load.detector import start_watch
+from nanokb.load.detector import start_watch
 
 
 class FakeLLMClient:

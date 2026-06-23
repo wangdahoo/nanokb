@@ -1,4 +1,4 @@
-"""``stage5_qa.generator`` 单测（方案 §3.5.3 step 6，Feature s1-feat-009）。
+"""``qa.generator`` 单测（方案 §3.5.3 step 6，Feature s1-feat-009）。
 
 覆盖 4 条关键行为：
 - AC #1：generate 返回带 ``^[source_file]`` 引用的 ``Answer``。
@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from nanokb.config import Settings
 from nanokb.models import Confidence, RetrievalHit, Triple
-from nanokb.stage5_qa.generator import (
+from nanokb.qa.generator import (
     _INFERRED_WARNING,
     _NO_RESULTS_TEXT,
     generate,

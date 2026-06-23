@@ -18,6 +18,13 @@ from pathlib import Path
 import pytest
 
 from nanokb.config import Settings
+from nanokb.extract import build_default_extractor
+from nanokb.extract.base import Extractor
+from nanokb.extract.code_track import (
+    CodeTrack,
+    spec_for_suffix,
+    supported_code_suffixes,
+)
 from nanokb.loaders import CodeLoader, DocumentLoader, UnsupportedFormatError
 from nanokb.models import (
     Chunk,
@@ -25,13 +32,6 @@ from nanokb.models import (
     Document,
     ExtractionResult,
     Track,
-)
-from nanokb.stage2_extract import build_default_extractor
-from nanokb.stage2_extract.base import Extractor
-from nanokb.stage2_extract.code_track import (
-    CodeTrack,
-    spec_for_suffix,
-    supported_code_suffixes,
 )
 
 FIXTURES_RAW = Path(__file__).resolve().parent.parent / "fixtures" / "raw"

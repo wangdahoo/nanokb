@@ -21,7 +21,7 @@ from typing import Any
 import networkx as nx
 
 from nanokb.config import Settings
-from nanokb.stage4_index.community import (
+from nanokb.index.community import (
     COMMUNITIES_FILENAME,
     _collapse_parallel_edges,
     _symmetrize,

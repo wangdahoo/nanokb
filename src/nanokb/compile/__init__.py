@@ -11,7 +11,7 @@
 
 from __future__ import annotations
 
-from nanokb.stage3_compile.graph_builder import GraphBuilder
-from nanokb.stage3_compile.normalize import normalize_entity
+from nanokb.compile.graph_builder import GraphBuilder
+from nanokb.compile.normalize import normalize_entity
 
 __all__ = ["GraphBuilder", "normalize_entity"]

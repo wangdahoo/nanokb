@@ -1,4 +1,4 @@
-"""``stage5_qa.review`` ``ReviewQueue`` + ``should_flag`` AMBIGUOUS 扩展单测
+"""``qa.review`` ``ReviewQueue`` + ``should_flag`` AMBIGUOUS 扩展单测
 （方案 §3.5.3 step 7 + AC #3，Feature s1-feat-013）。
 
 覆盖：
@@ -16,7 +16,7 @@ from pathlib import Path
 
 from nanokb.config import Settings
 from nanokb.models import Confidence, RetrievalHit, Triple
-from nanokb.stage5_qa.review import (
+from nanokb.qa.review import (
     REVIEW_QUEUE_FILENAME,
     ReviewEntry,
     ReviewQueue,

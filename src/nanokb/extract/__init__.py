@@ -12,12 +12,12 @@
 from __future__ import annotations
 
 from nanokb.config import Settings
+from nanokb.extract.base import Extractor
+from nanokb.extract.chunker import chunk_text
+from nanokb.extract.code_track import CodeTrack, supported_code_suffixes
+from nanokb.extract.semantic_track import SemanticTrack
 from nanokb.llm.base import LLMClient
 from nanokb.models import Document, ExtractionResult
-from nanokb.stage2_extract.base import Extractor
-from nanokb.stage2_extract.chunker import chunk_text
-from nanokb.stage2_extract.code_track import CodeTrack, supported_code_suffixes
-from nanokb.stage2_extract.semantic_track import SemanticTrack
 
 __all__ = [
     "CodeTrack",

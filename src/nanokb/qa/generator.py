@@ -21,7 +21,7 @@ import re
 from nanokb.config import Settings
 from nanokb.llm.base import LLMClient
 from nanokb.models import Answer, Confidence, RetrievalHit
-from nanokb.stage5_qa.review import should_flag
+from nanokb.qa.review import should_flag
 
 logger = logging.getLogger("nanokb")
 

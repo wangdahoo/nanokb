@@ -1,6 +1,6 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": [],
+  "plugin": ["golden-hoop-spell-opencode"],
   "mcp": {
     "codegraph": {
       "type": "local",

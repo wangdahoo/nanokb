@@ -20,6 +20,7 @@ from pathlib import Path
 
 import networkx as nx
 
+from nanokb.compile import GraphBuilder, normalize_entity
 from nanokb.config import Settings
 from nanokb.models import (
     Concept,
@@ -28,7 +29,6 @@ from nanokb.models import (
     Track,
     Triple,
 )
-from nanokb.stage3_compile import GraphBuilder, normalize_entity
 
 # ── 辅助构造 ─────────────────────────────────────────────────────────
 

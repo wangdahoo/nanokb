@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Protocol
 
 import networkx as nx  # type: ignore[import-untyped]
 
+from nanokb.compile.normalize import normalize_entity
 from nanokb.config import Settings
 from nanokb.llm.base import LLMClient, parse_json_loose
 from nanokb.models import (
@@ -35,12 +36,11 @@ from nanokb.models import (
     RetrievalHit,
     Triple,
 )
-from nanokb.stage3_compile.normalize import normalize_entity
-from nanokb.stage5_qa.prompt import render_hit
+from nanokb.qa.prompt import render_hit
 
 if TYPE_CHECKING:
-    from nanokb.stage4_index.community import CommunityResult
-    from nanokb.stage4_index.vector_store import VectorStore
+    from nanokb.index.community import CommunityResult
+    from nanokb.index.vector_store import VectorStore
 
 logger = logging.getLogger("nanokb")
 
@@ -309,7 +309,7 @@ class GraphRetriever:
 class VectorRetriever:
     """向量召回器：embed query → ChromaDB 近邻查询。
 
-    包装 ``stage4_index.vector_store.VectorStore.search``，返回 ``source="vector"``
+    包装 ``index.vector_store.VectorStore.search``，返回 ``source="vector"``
     的 ``RetrievalHit`` 列表。``hit.score`` 为原始相似度（``1.0 - distance``），
     confidence 统一为 ``EXTRACTED``（向量召回无三元组置信度概念，由 fuse 权重为 1.0）。
     """

@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import Any
 
 from nanokb.config import Settings
+from nanokb.extract.base import Extractor
+from nanokb.extract.semantic_track import SemanticTrack
 from nanokb.models import (
     Chunk,
     Confidence,
@@ -26,8 +28,6 @@ from nanokb.models import (
     ExtractionResult,
     Track,
 )
-from nanokb.stage2_extract.base import Extractor
-from nanokb.stage2_extract.semantic_track import SemanticTrack
 
 
 class FakeLLMClient:

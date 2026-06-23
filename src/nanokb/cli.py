@@ -20,9 +20,9 @@ from rich.console import Console
 from nanokb import pipeline
 from nanokb.config import Settings
 from nanokb.llm.base import make_llm_client
+from nanokb.load.detector import start_watch
 from nanokb.logging_setup import setup_logging
-from nanokb.stage1_load.detector import start_watch
-from nanokb.stage5_qa.review import ReviewQueue
+from nanokb.qa.review import ReviewQueue
 
 app = typer.Typer(
     name="nanokb",

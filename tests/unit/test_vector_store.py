@@ -26,7 +26,7 @@ import networkx as nx
 import pytest
 
 from nanokb import pipeline
-from nanokb.stage4_index.vector_store import (
+from nanokb.index.vector_store import (
     COLLECTION_NAME,
     EMBEDDING_DIM_KEY,
     EMBEDDING_MODEL_KEY,

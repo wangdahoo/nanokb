@@ -19,10 +19,10 @@
 
 from __future__ import annotations
 
-from nanokb.stage5_qa.generator import generate
-from nanokb.stage5_qa.prompt import compile_context
-from nanokb.stage5_qa.retriever import GraphRetriever
-from nanokb.stage5_qa.review import should_flag
+from nanokb.qa.generator import generate
+from nanokb.qa.prompt import compile_context
+from nanokb.qa.retriever import GraphRetriever
+from nanokb.qa.review import should_flag
 
 __all__ = [
     "GraphRetriever",
