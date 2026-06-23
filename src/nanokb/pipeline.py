@@ -82,7 +82,11 @@ from nanokb.stage5_qa.retriever import (
     Retriever,
     VectorRetriever,
 )
-from nanokb.stage5_qa.review import should_flag
+from nanokb.stage5_qa.review import (
+    ReviewQueue,
+    collect_entities,
+    determine_reason,
+)
 from nanokb.utils.io import atomic_write_json, staging_swap
 
 logger = logging.getLogger("nanokb")
@@ -488,7 +492,8 @@ def answer_query(
        （confidence 权重 × 相似度）→ tiktoken 裁剪。
     4. ``compile_context`` 渲染 hits 为纯文本上下文。
     5. ``generate`` 生成带 ``^[source_file]`` 引用的 ``Answer``。
-    6. ``should_flag`` 判定是否入 review_queue（写入由 s1-feat-013 接入）。
+    6. ``should_flag`` 判定是否入 review_queue（``generate`` 内部设置 ``review_flagged``）；
+       命中则 ``ReviewQueue.append`` 写入 ``out/review_queue.md``（s1-feat-013）。
 
     Args:
         settings: 全局配置。
@@ -525,7 +530,14 @@ def answer_query(
     hits = multi.recall(question)
     context = compile_context(hits, settings, llm)
     answer = generate(question, context, hits, llm, settings)
-    answer.review_flagged = should_flag(hits, settings)
+    # 方案 §阶段 5：generate 调用 should_flag 设置 review_flagged；命中则 append 到
+    # review_queue.md（s1-feat-013 主动学习闭环）。
+    if answer.review_flagged:
+        ReviewQueue(settings.out_dir).append(
+            question=question,
+            reason=determine_reason(hits, settings),
+            entities=collect_entities(hits),
+        )
     return AnswerQueryResult(answer=answer, hits=hits)
 
 

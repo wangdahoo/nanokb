@@ -1,4 +1,4 @@
-"""答案生成器（方案 §3.5.3 step 6，Feature s1-feat-009）。
+"""答案生成器（方案 §3.5.3 step 6，Feature s1-feat-009 + s1-feat-013）。
 
 将召回上下文与问题交给 LLM 生成可溯源 ``Answer``：
 
@@ -7,6 +7,8 @@
   ``Answer.used_inferred=True``，答案末尾附加 ``"此结论为 AI 推理，建议核实源文件"``。
 - **空上下文守卫**：上下文为空时直接返回 ``"未找到相关知识点"``（不调用 LLM、不幻觉）。
 - **Answer.confidence**：取 hits 中最严格者（``EXTRACTED > INFERRED > AMBIGUOUS``）。
+- **review_flagged**：调用 ``review.should_flag``（方案 §阶段 5：generator 调用
+  review.should_flag）判定是否入 review_queue；实际 append 由 pipeline 编排。
 
 s1-feat-012 的三路融合后由 ``MultiRetriever`` 调用本模块，接口不变。
 """
@@ -19,6 +21,7 @@ import re
 from nanokb.config import Settings
 from nanokb.llm.base import LLMClient
 from nanokb.models import Answer, Confidence, RetrievalHit
+from nanokb.stage5_qa.review import should_flag
 
 logger = logging.getLogger("nanokb")
 
@@ -58,7 +61,7 @@ def generate(
 ) -> Answer:
     """根据问题与上下文生成 ``Answer``。"""
     if not context.strip():
-        return _build_no_results_answer(hits)
+        return _build_no_results_answer(hits, settings)
 
     used_inferred = _contains_inferred(hits)
     raw = llm.complete(
@@ -70,7 +73,7 @@ def generate(
     text = (raw or "").strip()
     if not text:
         logger.warning("generate: LLM returned empty text; returning no-results answer")
-        return _build_no_results_answer(hits)
+        return _build_no_results_answer(hits, settings)
 
     citations = _CITATION_RE.findall(text)
     confidence = _pick_confidence(hits)
@@ -81,7 +84,7 @@ def generate(
         citations=citations,
         used_inferred=used_inferred,
         confidence=confidence,
-        review_flagged=False,
+        review_flagged=should_flag(hits, settings),
     )
 
 
@@ -89,14 +92,17 @@ def _build_user_prompt(question: str, context: str) -> str:
     return f"问题：{question}\n\n{context}"
 
 
-def _build_no_results_answer(hits: list[RetrievalHit]) -> Answer:
-    """构造 '未找到相关知识点' 答案（hits 为空时 confidence=AMBIGUOUS）。"""
+def _build_no_results_answer(hits: list[RetrievalHit], settings: Settings) -> Answer:
+    """构造 '未找到相关知识点' 答案（hits 为空时 confidence=AMBIGUOUS）。
+
+    空上下文同样调用 ``should_flag`` 设置 ``review_flagged``（通常命中 low_hit_count）。
+    """
     return Answer(
         text=_NO_RESULTS_TEXT,
         citations=[],
         used_inferred=False,
         confidence=_pick_confidence(hits) if hits else Confidence.AMBIGUOUS,
-        review_flagged=False,
+        review_flagged=should_flag(hits, settings),
     )
 
 

@@ -3,7 +3,8 @@
 六个子命令：build / query / ask / search / status / review。
 build 接入编译流水线（Feature s1-feat-008，``--watch`` 接入 s1-feat-004 queue 模型）；
 query/ask/search 接入三路召回问答（Feature s1-feat-012：
-query=三路融合 / ask=仅向量 / search=仅社区）；review 待 s1-feat-013 接入。
+query=三路融合 / ask=仅向量 / search=仅社区）；review 接入主动学习闭环
+（Feature s1-feat-013：列出 / 清空 out/review_queue.md）。
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from nanokb.config import Settings
 from nanokb.llm.base import make_llm_client
 from nanokb.logging_setup import setup_logging
 from nanokb.stage1_load.detector import start_watch
+from nanokb.stage5_qa.review import ReviewQueue
 
 app = typer.Typer(
     name="nanokb",
@@ -259,9 +261,27 @@ def review(
     clear: bool = typer.Option(False, "--clear", help="清空 review 待审队列。"),
 ) -> None:
     """列出 / 清空主动学习待审队列（out/review_queue.md）。"""
-    console.print(
-        f"[yellow]review 命令需先完成阶段 5（主动学习闭环）后接入。clear={clear}[/yellow]"
-    )
+    settings = _load_settings()
+    setup_logging(settings.out_dir)
+    queue = ReviewQueue(settings.out_dir)
+
+    if clear:
+        queue.clear()
+        console.print("[green]已清空 review 待审队列。[/green]")
+        return
+
+    entries = queue.list_pending()
+    if not entries:
+        console.print("[yellow]review 队列为空（无待审条目）。[/yellow]")
+        return
+
+    console.print(f"[green]待审条目（{len(entries)} 条）：[/green]")
+    for idx, entry in enumerate(entries, 1):
+        console.print(f"{idx}. {entry.question}")
+        console.print(
+            f"   [dim]原因：{entry.reason} | 实体：{entry.entities} | "
+            f"时间：{entry.timestamp}[/dim]"
+        )
 
 
 __all__ = ["app"]
