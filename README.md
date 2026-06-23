@@ -323,7 +323,7 @@ nanokb review               # 检查待审队列 → 补充 raw/ 文档 → rebu
 ```
 raw/                         原始文档(知识源,建议提交到版本控制)
   *.md *.txt *.pdf *.docx      → unstructured 文本抽取
-  *.py *.js *.java              → tree-sitter 确定性抽取
+  *.py *.js *.java             → tree-sitter 确定性抽取
 out/                         编译产物(默认 gitignore,可由 --replay 重建)
   graph.json                 知识图谱(NetworkX MultiDiGraph 序列化)
   graph.graphml              GraphML 格式(当 GRAPH_SERIALIZATION=graphml)
