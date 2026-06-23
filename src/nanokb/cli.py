@@ -74,6 +74,8 @@ def _print_compile_summary(result: pipeline.CompileResult) -> None:
         f"deleted={len(ch.deleted)}",
         f"extracted={result.extracted_count}",
     ]
+    if result.cached_count:
+        parts.append(f"cached={result.cached_count}")
     if result.skipped:
         parts.append(f"skipped={len(result.skipped)}")
     if result.synthesized_fallback_count:
