@@ -12,11 +12,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 
 from nanokb.config import Settings
 
 
-def _sig(payload: dict[str, object]) -> str:
+def _sig(payload: Mapping[str, object]) -> str:
     """稳定内容寻址签名：``sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False))``。
 
     ``sort_keys=True`` 仅排序 dict 的键；list 元素顺序保留原样，因此调用方对
