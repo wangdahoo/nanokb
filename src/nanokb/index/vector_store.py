@@ -35,7 +35,7 @@ from nanokb.models import RetrievalHit
 if TYPE_CHECKING:
     import networkx as nx  # type: ignore[import-untyped]
 
-    from nanokb.llm.base import LLMClient
+    from nanokb.llm.base import EmbeddingClient
 
 logger = logging.getLogger("nanokb")
 
@@ -123,11 +123,14 @@ class VectorStore:
 
         self._collection = col
 
-    def index_nodes(self, graph: nx.MultiDiGraph, llm: LLMClient) -> None:
+    def index_nodes(self, graph: nx.MultiDiGraph, llm: EmbeddingClient) -> None:
         """为图中每个节点的 description 生成 embedding 并 upsert（Medium #9 幂等）。
 
         每个节点以 ``id=f"{source_file}::{node}"`` 作为主键 upsert，保证同文件二次
         index 不累积重复向量。``source_file`` 缺失的节点默认用 ``"unknown"``。
+
+        ``llm`` 仅使用其 ``embed`` 方法（``EmbeddingClient`` 协议）；生文与向量解耦后，
+        此处接收的是独立的 embedding 客户端（``LLMClient`` 是其超集，向后兼容）。
 
         空描述节点跳过 + WARNING（Opt #2 v3）。v4 Medium #1：pipeline 保证
         ``synthesize_fallback_descriptions`` 先于此方法执行，故实际调用时节点描述
@@ -199,14 +202,19 @@ class VectorStore:
         )
 
     def search(
-        self, query: str, k: int = DEFAULT_SEARCH_K, *, llm: LLMClient | None = None
+        self,
+        query: str,
+        k: int = DEFAULT_SEARCH_K,
+        *,
+        embedder: EmbeddingClient | None = None,
     ) -> list[RetrievalHit]:
         """向量语义召回：embed query → ChromaDB 近邻查询 → ``RetrievalHit`` 列表。
 
         Args:
             query: 自然语言查询文本。
             k: 召回数量上限。
-            llm: 用于 embed query 的 LLM 客户端（必须提供）。
+            embedder: 用于 embed query 的 embedding 客户端（``EmbeddingClient`` 协议，
+                仅用 ``embed``；必须提供）。
 
         Returns:
             ``RetrievalHit`` 列表，``score = 1.0 - distance``（cosine 距离转相似度），
@@ -215,10 +223,10 @@ class VectorStore:
         col = self._collection
         if col is None:
             raise RuntimeError("collection not initialized; call _ensure_collection first")
-        if llm is None:
-            raise ValueError("search requires an llm client to embed the query")
+        if embedder is None:
+            raise ValueError("search requires an embedder client to embed the query")
 
-        query_embeddings = llm.embed([query])
+        query_embeddings = embedder.embed([query])
         if not query_embeddings:
             return []
 

@@ -407,4 +407,5 @@ raw/
 out/
 
 .opencode/
+.codegraph/
 Modelfile

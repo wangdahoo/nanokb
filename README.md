@@ -291,6 +291,33 @@ nanokb review               # 检查待审队列 → 补充 raw/ 文档 → rebu
 |------|--------|------|
 | `NANOKB_EMBEDDING_PROVIDER` | `openai` | `openai` \| `ollama` |
 | `NANOKB_EMBEDDING_MODEL` | `text-embedding-3-small` | 向量模型 |
+| `NANOKB_EMBEDDING_API_KEY` | — | embedding 专用 key（缺失回退 `NANOKB_OPENAI_API_KEY`） |
+| `NANOKB_EMBEDDING_BASE_URL` | — | embedding 专用端点（缺失回退 `NANOKB_OPENAI_BASE_URL`） |
+
+> **生文与向量解耦**：`NANOKB_EMBEDDING_*` 三件套允许生文和 embedding 用不同厂商。
+> 不配置时 embedding 复用生文的 OpenAI 兼容端点（向后兼容）。
+>
+> **例 1**：生文 DeepSeek + embedding 智谱 GLM `embedding-3`
+> ```ini
+> NANOKB_LLM_PROVIDER=openai
+> NANOKB_LLM_MODEL=deepseek-chat
+> NANOKB_OPENAI_API_KEY=sk-deepseek...
+> NANOKB_OPENAI_BASE_URL=https://api.deepseek.com
+> NANOKB_EMBEDDING_PROVIDER=openai
+> NANOKB_EMBEDDING_MODEL=embedding-3
+> NANOKB_EMBEDDING_API_KEY=<智谱 key>
+> NANOKB_EMBEDDING_BASE_URL=https://open.bigmodel.cn/api/paas/v4
+> ```
+>
+> **例 2**：生文 DeepSeek + embedding 本地 Ollama
+> ```ini
+> NANOKB_LLM_PROVIDER=openai
+> NANOKB_OPENAI_API_KEY=sk-deepseek...
+> NANOKB_OPENAI_BASE_URL=https://api.deepseek.com
+> NANOKB_EMBEDDING_PROVIDER=ollama
+> NANOKB_EMBEDDING_MODEL=nomic-embed-text
+> NANOKB_OLLAMA_BASE_URL=http://localhost:11434
+> ```
 
 ### 目录与分块
 

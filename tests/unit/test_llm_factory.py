@@ -12,7 +12,12 @@ import tiktoken
 
 from nanokb.config import Settings
 from nanokb.llm.anthropic_client import AnthropicClient
-from nanokb.llm.base import LLMClient, make_llm_client
+from nanokb.llm.base import (
+    EmbeddingClient,
+    LLMClient,
+    make_embedding_client,
+    make_llm_client,
+)
 from nanokb.llm.ollama_client import OllamaClient
 from nanokb.llm.openai_client import OpenAIClient
 
@@ -254,3 +259,135 @@ def test_client_construction_is_offline_safe(monkeypatch: pytest.MonkeyPatch) ->
     AnthropicClient(api_key="sk-ant-fake", model="claude-3-5-sonnet-20241022", embedding_model="x")
     OllamaClient(base_url="http://localhost:11434", model="llama3", embedding_model="x")
     assert calls == []  # 构造期零调用，下载延迟到 count_tokens
+
+
+# ══════════════════════════════════════════════════════════════════════
+# make_embedding_client 工厂（生文与向量解耦）
+# ══════════════════════════════════════════════════════════════════════
+
+
+def test_make_embedding_client_openai_default() -> None:
+    """embedding_provider=openai，回退 openai_api_key/base_url → OpenAIClient。"""
+    settings = Settings(
+        embedding_provider="openai",
+        openai_api_key="sk-fake",
+        embedding_model="text-embedding-3-small",
+    )
+    client = make_embedding_client(settings)
+    assert isinstance(client, OpenAIClient)
+    assert isinstance(client, EmbeddingClient)  # Protocol 合规
+    assert isinstance(client, LLMClient)  # 超集，兼容
+
+
+def test_make_embedding_client_uses_dedicated_key_and_base_url() -> None:
+    """配置独立 embedding_api_key / embedding_base_url 时透传到独立端点。"""
+    settings = Settings(
+        embedding_provider="openai",
+        openai_api_key="sk-deepseek",  # 生文 key（不应被 embedding 使用）
+        openai_base_url="https://api.deepseek.com",
+        embedding_api_key="sk-glm",
+        embedding_base_url="https://open.bigmodel.cn/api/paas/v4",
+        embedding_model="embedding-3",
+    )
+    client = make_embedding_client(settings)
+    assert isinstance(client, OpenAIClient)
+    assert str(client._client.base_url).startswith("https://open.bigmodel.cn")
+
+
+def test_make_embedding_client_ollama() -> None:
+    """embedding_provider=ollama → OllamaClient（无需 key，本地端点）。"""
+    settings = Settings(
+        embedding_provider="ollama",
+        embedding_model="nomic-embed-text",
+        ollama_base_url="http://localhost:11434",
+    )
+    client = make_embedding_client(settings)
+    assert isinstance(client, OllamaClient)
+    assert isinstance(client, EmbeddingClient)
+
+
+def test_make_embedding_client_openai_missing_key_exits_2() -> None:
+    """openai embedding 无任何可用 key（embedding_api_key / openai_api_key 均缺）→ exit 2。"""
+    settings = Settings(embedding_provider="openai")  # 无任何 key
+    with pytest.raises(SystemExit) as exc:
+        make_embedding_client(settings)
+    assert exc.value.code == 2
+
+
+def test_make_embedding_client_openai_falls_back_to_chat_key() -> None:
+    """未配 embedding_api_key 时回退 openai_api_key（向后兼容：生文与 embedding 共用）。"""
+    settings = Settings(
+        embedding_provider="openai",
+        openai_api_key="sk-shared",
+        embedding_model="text-embedding-3-small",
+    )
+    client = make_embedding_client(settings)
+    assert isinstance(client, OpenAIClient)
+
+
+def test_make_embedding_client_ollama_needs_no_key() -> None:
+    """ollama embedding 不需要 key（本地服务）。"""
+    settings = Settings(embedding_provider="ollama", embedding_model="nomic-embed-text")
+    client = make_embedding_client(settings)
+    assert isinstance(client, OllamaClient)
+
+
+# ── _resolve_embedder 向后兼容回退（生文/向量解耦调度点） ─────────
+
+
+def test_resolve_embedder_reuses_chat_llm_without_dedicated_config() -> None:
+    """未配置独立 embedding 端点 → 复用 chat llm（同一对象，向后兼容）。"""
+    from nanokb.pipeline import _resolve_embedder
+
+    settings = Settings(
+        embedding_provider="openai",
+        openai_api_key="sk-fake",
+    )  # 无 embedding_api_key / embedding_base_url
+    chat_llm = OpenAIClient(api_key="sk-fake", model="deepseek-chat", embedding_model="x")
+    embedder = _resolve_embedder(settings, None, chat_llm)
+    assert embedder is chat_llm  # 同一对象
+
+
+def test_resolve_embedder_prefers_explicit_injection() -> None:
+    """显式注入 embedding_client 时直接返回（测试 / 自定义场景）。"""
+    from nanokb.pipeline import _resolve_embedder
+
+    settings = Settings(embedding_provider="openai", openai_api_key="sk-fake")
+    chat_llm = OpenAIClient(api_key="sk-fake", model="m", embedding_model="x")
+    explicit = OllamaClient(base_url="http://localhost:11434", model="m", embedding_model="x")
+    embedder = _resolve_embedder(settings, explicit, chat_llm)
+    assert embedder is explicit
+
+
+def test_resolve_embedder_builds_independent_client_for_dedicated_config() -> None:
+    """配置了独立 embedding 端点 → 构造独立 client（不复用 chat llm）。"""
+    from nanokb.pipeline import _resolve_embedder
+
+    settings = Settings(
+        embedding_provider="openai",
+        openai_api_key="sk-deepseek",
+        openai_base_url="https://api.deepseek.com",
+        embedding_api_key="sk-glm",
+        embedding_base_url="https://open.bigmodel.cn/api/paas/v4",
+        embedding_model="embedding-3",
+    )
+    chat_llm = OpenAIClient(api_key="sk-deepseek", model="deepseek-chat", embedding_model="x")
+    embedder = _resolve_embedder(settings, None, chat_llm)
+    assert embedder is not chat_llm
+    assert isinstance(embedder, OpenAIClient)
+    assert str(embedder._client.base_url).startswith("https://open.bigmodel.cn")
+
+
+def test_resolve_embedder_builds_ollama_when_provider_is_ollama() -> None:
+    """embedding_provider=ollama 即使有 openai_api_key 也走独立 ollama client。"""
+    from nanokb.pipeline import _resolve_embedder
+
+    settings = Settings(
+        embedding_provider="ollama",
+        openai_api_key="sk-fake",  # 生文仍可用 openai 兼容
+        embedding_model="nomic-embed-text",
+    )
+    chat_llm = OpenAIClient(api_key="sk-fake", model="deepseek-chat", embedding_model="x")
+    embedder = _resolve_embedder(settings, None, chat_llm)
+    assert embedder is not chat_llm
+    assert isinstance(embedder, OllamaClient)

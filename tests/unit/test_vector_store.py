@@ -292,7 +292,7 @@ def test_search_returns_retrieval_hits(tmp_path: Path) -> None:
     graph = _make_graph()
     vs.index_nodes(graph, llm)
 
-    hits = vs.search("query text", k=2, llm=llm)
+    hits = vs.search("query text", k=2, embedder=llm)
 
     assert len(hits) <= 2
     assert len(hits) > 0
@@ -306,13 +306,13 @@ def test_search_empty_collection_returns_empty(tmp_path: Path) -> None:
     """空 collection 的 search 返回空列表。"""
     llm = FakeLLMClient(embedding_dim=4)
     vs = VectorStore(tmp_path / "chroma", "test-model", 4)
-    assert vs.search("query", k=5, llm=llm) == []
+    assert vs.search("query", k=5, embedder=llm) == []
 
 
 def test_search_requires_llm(tmp_path: Path) -> None:
-    """search 未提供 llm → ValueError。"""
+    """search 未提供 embedder → ValueError。"""
     vs = VectorStore(tmp_path / "chroma", "test-model", 4)
-    with pytest.raises(ValueError, match="llm"):
+    with pytest.raises(ValueError, match="embedder"):
         vs.search("query", k=5)
 
 

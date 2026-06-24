@@ -61,8 +61,13 @@ class Settings(BaseSettings):
     llm_rate_limit_retries: int = 3  # SDK 重试耗尽后的应用层 429 补充重试
 
     # ── Embedding ───────────────────────────────────────────────────
+    # embedding 与生文可解耦：单独指定 provider/key/base_url。
+    # embedding_api_key / embedding_base_url 缺失时回退到 openai_api_key /
+    # openai_base_url（向后兼容：生文与 embedding 共用同一 OpenAI 兼容端点）。
     embedding_provider: Literal["openai", "ollama"] = "openai"
     embedding_model: str = "text-embedding-3-small"
+    embedding_api_key: SecretStr | None = None  # openai 兼容 embedding 专用 key
+    embedding_base_url: str | None = None  # openai 兼容 embedding 专用端点（如智谱 GLM）
 
     # ── 图谱 ────────────────────────────────────────────────────────
     graph_serialization: Literal["json", "graphml"] = "json"

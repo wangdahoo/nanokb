@@ -29,7 +29,7 @@ import networkx as nx  # type: ignore[import-untyped]
 
 from nanokb.compile.normalize import normalize_entity
 from nanokb.config import Settings
-from nanokb.llm.base import LLMClient, parse_json_loose
+from nanokb.llm.base import EmbeddingClient, LLMClient, parse_json_loose
 from nanokb.models import (
     Concept,
     Confidence,
@@ -322,7 +322,7 @@ class VectorRetriever:
     def __init__(
         self,
         vector_store: VectorStore,
-        llm: LLMClient,
+        llm: EmbeddingClient,
         settings: Settings,
     ) -> None:
         self._vector_store = vector_store
@@ -335,7 +335,7 @@ class VectorRetriever:
         ``VectorStore.search`` 失败（如 collection 损坏）时降级为空召回，不阻塞融合。
         """
         try:
-            hits = self._vector_store.search(question, k=_VECTOR_SEARCH_K, llm=self._llm)
+            hits = self._vector_store.search(question, k=_VECTOR_SEARCH_K, embedder=self._llm)
         except Exception:
             logger.warning(
                 "vector recall failed; degrading to empty",

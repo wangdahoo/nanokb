@@ -57,7 +57,7 @@ from nanokb.extract.base import Extractor
 from nanokb.extract.cache import ExtractionCache
 from nanokb.index import VectorStore, build_indexes
 from nanokb.index.community import CommunityResult, load_communities
-from nanokb.llm.base import LLMClient, make_llm_client
+from nanokb.llm.base import EmbeddingClient, LLMClient, make_embedding_client, make_llm_client
 from nanokb.load.detector import (
     SUPPORTED_SUFFIXES,
     ChangeSet,
@@ -168,7 +168,7 @@ class VectorStoreBackend(Protocol):
         """删除 ``source_file`` 的全部向量（where={"source_file":source_file}）。"""
         ...
 
-    def index_nodes(self, graph: nx.MultiDiGraph, llm: LLMClient) -> None:
+    def index_nodes(self, graph: nx.MultiDiGraph, llm: EmbeddingClient) -> None:
         """为图中每个节点的 description 生成 embedding 并 upsert。
 
         v4 Medium #1：调用前须确保 fallback 描述已合成（pipeline 保证
@@ -187,18 +187,21 @@ def compile(  # noqa: A001  — 故意与内建同名，方案 §3.5.1 指定
     registry: LoaderRegistry | None = None,
     extractor_factory: Callable[[LLMClient, Settings], Extractor] | None = None,
     vector_store: VectorStoreBackend | None = None,
+    embedding_client: EmbeddingClient | None = None,
     force: bool = False,
 ) -> CompileResult:
     """执行编译流水线（两阶段结构 + v4 step 5/6/7 三段时机）。
 
     Args:
         settings: 全局配置（raw_dir / out_dir / 模型身份等）。
-        llm: LLM 客户端；``None`` 时通过 ``make_llm_client(settings)`` 创建
+        llm: LLM 客户端（生文抽取）；``None`` 时通过 ``make_llm_client(settings)`` 创建
             （缺 API key 会 exit 2）。
         registry: 文档加载注册表；``None`` 时用默认（UnstructuredLoader）。
         extractor_factory: 自定义抽取器工厂；``None`` 时用默认分发抽取器
             （代码文件 → CodeTrack，其余 → SemanticTrack）。
         vector_store: 向量库后端；``None`` 时跳过向量操作（stage4 未实现阶段）。
+        embedding_client: 向量嵌入客户端；``None`` 时经 ``_resolve_embedder`` 解析
+            （未配置独立 embedding 端点时复用 ``llm``，否则 ``make_embedding_client``）。
         force: ``True`` 时忽略 manifest 全量重编译（空 manifest + 空图起步）。
 
     Returns:
@@ -241,11 +244,15 @@ def compile(  # noqa: A001  — 故意与内建同名，方案 §3.5.1 指定
     if llm is None:
         llm = make_llm_client(settings)
 
+    # 生文与向量解耦：embedder 可独立于 chat llm（生文 DeepSeek + embedding GLM/ollama）。
+    # _resolve_embedder 在未配置独立 embedding 端点时复用 llm（向后兼容）。
+    embedder = _resolve_embedder(settings, embedding_client, llm)
+
     logger.info("probing embedding dimensions...", extra={"stage": "compile-probe"})
     # s1-feat-011: 向量库后端。vector_store=None 时自动构造真实 ChromaDB VectorStore，
-    # 使 CLI build 端到端产出向量。探测 embedding 维度保证 VectorStore 元数据与 llm.embed
+    # 使 CLI build 端到端产出向量。探测 embedding 维度保证 VectorStore 元数据与 embedder.embed
     # 实际输出维度一致（Medium #7 维度校验依赖此一致性）。
-    actual_embedding_dim = _probe_embedding_dim(llm)
+    actual_embedding_dim = _probe_embedding_dim(embedder)
     if vector_store is None:
         vector_store = VectorStore(
             settings.out_dir / "chroma",
@@ -413,7 +420,7 @@ def compile(  # noqa: A001  — 故意与内建同名，方案 §3.5.1 指定
                 continue
             subgraph = _subgraph_for_source(graph, path)
             if subgraph.number_of_nodes() > 0:
-                vector_store.index_nodes(subgraph, llm)
+                vector_store.index_nodes(subgraph, embedder)
 
     # step 8: build_indexes（community + keyword）——s1-feat-011
     # 由 _finalize_staging 内部调用 build_indexes 写入 staging 目录。
@@ -585,6 +592,7 @@ def answer_query(
     *,
     mode: AnswerMode = "query",
     llm: LLMClient | None = None,
+    embedding_client: EmbeddingClient | None = None,
     graph: nx.MultiDiGraph | None = None,
     vector_store: VectorStoreBackend | None = None,
     communities: CommunityResult | None = None,
@@ -640,9 +648,12 @@ def answer_query(
             graph = _load_graph(settings.out_dir)
         if llm is None:
             llm = make_llm_client(settings)
+        # 生文与向量解耦：未配置独立 embedding 端点时复用 llm（向后兼容）
+        embedder = _resolve_embedder(settings, embedding_client, llm)
 
         retrievers = _build_retrievers_for_mode(
-            mode, graph, llm, settings, vector_store=vector_store, communities=communities
+            mode, graph, llm, settings,
+            embedder=embedder, vector_store=vector_store, communities=communities,
         )
     multi = MultiRetriever(retrievers, settings, llm, progress=progress_reporter)
     hits = multi.recall(question)
@@ -718,6 +729,7 @@ def _build_retrievers_for_mode(
     llm: LLMClient,
     settings: Settings,
     *,
+    embedder: EmbeddingClient,
     vector_store: VectorStoreBackend | object | None = None,
     communities: CommunityResult | None = None,
 ) -> list[Retriever]:
@@ -728,13 +740,16 @@ def _build_retrievers_for_mode(
     - ``query``：``GraphRetriever`` 始终启用；``enable_vector_recall`` 且向量库就绪
       时加 ``VectorRetriever``；``enable_community_recall`` 且社区就绪时加
       ``CommunityRetriever``（升级 s1-feat-009 的仅 graph 路为三路融合）。
+
+    ``llm`` 用于 graph/community 两路的 NER（``complete``）；``embedder`` 用于
+    ``VectorRetriever`` 的 query embedding（生文与向量解耦）。
     """
     if mode == "ask":
-        vs = _ensure_vector_store(settings, llm, vector_store)
+        vs = _ensure_vector_store(settings, embedder, vector_store)
         if vs is None:
             logger.warning("ask: vector store unavailable; returning empty retrievers")
             return []
-        return [VectorRetriever(vs, llm, settings)]
+        return [VectorRetriever(vs, embedder, settings)]
 
     if mode == "search":
         comm = communities if communities is not None else load_communities(settings.out_dir)
@@ -746,9 +761,9 @@ def _build_retrievers_for_mode(
     # mode == "query"：三路融合
     retrievers: list[Retriever] = [GraphRetriever(graph, llm, settings)]
     if settings.enable_vector_recall:
-        vs = _ensure_vector_store(settings, llm, vector_store)
+        vs = _ensure_vector_store(settings, embedder, vector_store)
         if vs is not None:
-            retrievers.append(VectorRetriever(vs, llm, settings))
+            retrievers.append(VectorRetriever(vs, embedder, settings))
     if settings.enable_community_recall:
         comm = communities if communities is not None else load_communities(settings.out_dir)
         if comm is not None and comm.communities:
@@ -758,7 +773,7 @@ def _build_retrievers_for_mode(
 
 def _ensure_vector_store(
     settings: Settings,
-    llm: LLMClient,
+    embedder: EmbeddingClient,
     explicit: VectorStoreBackend | object | None,
 ) -> VectorStore | None:
     """加载或复用 ``VectorStore``；不可用（chroma 目录不存在）返回 None。
@@ -766,6 +781,8 @@ def _ensure_vector_store(
     优先复用调用方传入的 ``explicit``（测试注入），否则从 ``out/chroma`` 加载真实
     ``VectorStore``。embedding_dim 从 manifest FileState 推断（取已记录维度的众数），
     缺失时降级用 ``_probe_embedding_dim`` 探测。
+
+    ``embedder`` 用于维度探测（``embed`` 探针）；生文与向量解耦后独立于 chat llm。
     """
     if explicit is not None:
         # 测试注入的 FakeVectorStore 无 search 方法，仅 query 模式下真实 VectorStore 才走
@@ -782,7 +799,7 @@ def _ensure_vector_store(
     try:
         manifest = _load_manifest(settings.out_dir)
         dims = [fs.embedding_dim for fs in manifest.files.values() if fs.embedding_dim]
-        embedding_dim = dims[0] if dims else _probe_embedding_dim(llm)
+        embedding_dim = dims[0] if dims else _probe_embedding_dim(embedder)
         return VectorStore(chroma_path, settings.embedding_model, embedding_dim)
     except Exception:
         logger.warning(
@@ -794,6 +811,35 @@ def _ensure_vector_store(
 
 
 # ── 辅助函数 ──────────────────────────────────────────────────────────
+
+
+def _resolve_embedder(
+    settings: Settings,
+    embedding_client: EmbeddingClient | None,
+    chat_llm: LLMClient,
+) -> EmbeddingClient:
+    """解析向量嵌入客户端（生文与向量解耦的核心调度点）。
+
+    优先级：
+    1. 调用方显式注入的 ``embedding_client``（测试 / 自定义）。
+    2. 用户未配置独立 embedding 端点（``embedding_provider=openai`` 且未设
+       ``embedding_api_key`` / ``embedding_base_url``）→ **复用 chat llm**
+       （向后兼容：生文与 embedding 共用同一 OpenAI 兼容端点，行为与旧版一致）。
+    3. 用户配置了独立 embedding（``embedding_provider=ollama`` 或专用 key/url）
+       → ``make_embedding_client(settings)`` 构造独立客户端。
+
+    ``chat_llm`` 是 ``EmbeddingClient`` 的结构超集（实现了 ``embed``），故情形 2
+    直接返回 ``chat_llm`` 满足 ``EmbeddingClient`` 协议。
+    """
+    if embedding_client is not None:
+        return embedding_client
+    if (
+        settings.embedding_provider == "openai"
+        and not settings.embedding_api_key
+        and not settings.embedding_base_url
+    ):
+        return chat_llm
+    return make_embedding_client(settings)
 
 
 def build_default_registry() -> LoaderRegistry:
@@ -1015,14 +1061,14 @@ def _finalize_staging(
     staging_swap(staging, out_dir)
 
 
-def _probe_embedding_dim(llm: LLMClient) -> int:
-    """探测 ``llm.embed`` 实际输出维度（用于 VectorStore 元数据 + FileState）。
+def _probe_embedding_dim(embedder: EmbeddingClient) -> int:
+    """探测 ``embedder.embed`` 实际输出维度（用于 VectorStore 元数据 + FileState）。
 
     发送单条探针文本，取返回向量的维度。探测失败（网络 / API 异常）时返回 0，
     VectorStore 以 dim=0 构造（metadata 记 0，ChromaDB 实际维度由首次 upsert 推断）。
     """
     try:
-        probe = llm.embed(["nanokb-embedding-dim-probe"])
+        probe = embedder.embed(["nanokb-embedding-dim-probe"])
         if probe and probe[0]:
             return len(probe[0])
     except Exception:
