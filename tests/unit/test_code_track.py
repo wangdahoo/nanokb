@@ -158,8 +158,7 @@ def test_python_extract_emits_calls_triple_with_extracted_confidence() -> None:
     result = track.extract(_doc("mod.py", _PY_FOO_CALLS_BAR))
 
     calls = [
-        t for t in result.triples
-        if t.head == "foo" and t.relation == "calls" and t.tail == "bar"
+        t for t in result.triples if t.head == "foo" and t.relation == "calls" and t.tail == "bar"
     ]
     assert len(calls) == 1
     triple = calls[0]
@@ -209,28 +208,18 @@ def test_python_extract_emits_defines_for_top_level_function() -> None:
     track = CodeTrack(Settings())
     result = track.extract(_doc("mod.py", _PY_FOO_CALLS_BAR))
 
-    defines = [
-        t for t in result.triples
-        if t.relation == "defines" and t.tail == "foo"
-    ]
+    defines = [t for t in result.triples if t.relation == "defines" and t.tail == "foo"]
     assert len(defines) == 1
     assert defines[0].head == "mod"  # 文件 stem 作为模块节点
 
 
 def test_python_extract_class_and_method_emits_contains() -> None:
     """Python 类内 function_definition 降级为 method，并产出 (Class, contains, method)。"""
-    src = (
-        "class Calc:\n"
-        "    def add(self, x, y):\n"
-        "        return helper(x, y)\n"
-    )
+    src = "class Calc:\n    def add(self, x, y):\n        return helper(x, y)\n"
     track = CodeTrack(Settings())
     result = track.extract(_doc("mod.py", src))
 
-    contains = [
-        t for t in result.triples
-        if t.relation == "contains" and t.tail == "add"
-    ]
+    contains = [t for t in result.triples if t.relation == "contains" and t.tail == "add"]
     assert len(contains) == 1
     assert contains[0].head == "Calc"
 
@@ -244,11 +233,7 @@ def test_python_extract_class_and_method_emits_contains() -> None:
 
 def test_python_extract_member_call_callee_is_method_name() -> None:
     """obj.method() 调用 → callee 取方法名（attribute 末段）。"""
-    src = (
-        "def foo():\n"
-        "    obj.helper(1)\n"
-        "    bar.baz.qux(2)\n"
-    )
+    src = "def foo():\n    obj.helper(1)\n    bar.baz.qux(2)\n"
     track = CodeTrack(Settings())
     result = track.extract(_doc("mod.py", src))
 
@@ -263,10 +248,7 @@ def test_python_extract_self_call_is_skipped() -> None:
     track = CodeTrack(Settings())
     result = track.extract(_doc("mod.py", src))
 
-    self_calls = [
-        t for t in result.triples
-        if t.relation == "calls" and t.head == t.tail
-    ]
+    self_calls = [t for t in result.triples if t.relation == "calls" and t.head == t.tail]
     assert self_calls == []
 
 
@@ -356,20 +338,13 @@ def test_java_file_named_after_class_has_no_defines_self_loop() -> None:
     track = CodeTrack(Settings())
     result = track.extract(_doc("Calc.java", _JAVA_SRC))
 
-    self_loops = [
-        t for t in result.triples
-        if t.relation == "defines" and t.head == t.tail
-    ]
+    self_loops = [t for t in result.triples if t.relation == "defines" and t.head == t.tail]
     assert self_loops == []
 
 
 def test_java_method_invocation_on_receiver_uses_name_field() -> None:
     """Java helper.run(a) → callee 为 name 字段 run（非 receiver helper）。"""
-    src = (
-        "class C {\n"
-        "  void m() { obj.helper(1); }\n"
-        "}\n"
-    )
+    src = "class C {\n  void m() { obj.helper(1); }\n}\n"
     track = CodeTrack(Settings())
     result = track.extract(_doc("C.java", src))
 

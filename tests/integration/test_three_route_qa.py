@@ -58,10 +58,7 @@ class FakeLLMClient:
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         # 按文本首字符生成稳定但可区分的向量，让向量召回可区分相关 / 不相关节点
-        return [
-            [float((hash(t) >> i) & 0xFF) / 255.0 for i in range(self._dim)]
-            for t in texts
-        ]
+        return [[float((hash(t) >> i) & 0xFF) / 255.0 for i in range(self._dim)] for t in texts]
 
     def count_tokens(self, text: str) -> int:
         return max(1, len(text) // 4)
@@ -73,27 +70,33 @@ def _ner(entities: list[str]) -> str:
 
 def _extract_response() -> str:
     """FakeLLM 抽取响应：Transformer→Attention (EXTRACTED) + Transformer→Model (INFERRED)。"""
-    return json.dumps({
-        "triples": [
-            {
-                "head": "Transformer",
-                "relation": "uses",
-                "tail": "Attention",
-                "confidence": "EXTRACTED",
-            },
-            {
-                "head": "Transformer",
-                "relation": "is_a",
-                "tail": "Model",
-                "confidence": "INFERRED",
-            },
-        ],
-        "concepts": [
-            {"name": "Transformer", "description": "A sequence model.", "node_type": "model"},
-            {"name": "Attention", "description": "A focus mechanism.", "node_type": "mechanism"},
-            {"name": "Model", "description": "A model category.", "node_type": "category"},
-        ],
-    })
+    return json.dumps(
+        {
+            "triples": [
+                {
+                    "head": "Transformer",
+                    "relation": "uses",
+                    "tail": "Attention",
+                    "confidence": "EXTRACTED",
+                },
+                {
+                    "head": "Transformer",
+                    "relation": "is_a",
+                    "tail": "Model",
+                    "confidence": "INFERRED",
+                },
+            ],
+            "concepts": [
+                {"name": "Transformer", "description": "A sequence model.", "node_type": "model"},
+                {
+                    "name": "Attention",
+                    "description": "A focus mechanism.",
+                    "node_type": "mechanism",
+                },
+                {"name": "Model", "description": "A model category.", "node_type": "category"},
+            ],
+        }
+    )
 
 
 def _build_full_kb(tmp_path: Path, *, enable_vector: bool = True) -> Settings:
@@ -161,6 +164,7 @@ def test_query_fusion_ranks_extracted_above_inferred(tmp_path: Path) -> None:
         # 取前两条 graph triple 的 confidence 序列
         confs = [t.confidence for t in graph_triples[:2]]
         from nanokb.models import Confidence
+
         # EXTRACTED 排在 INFERRED 前（EXTRACTED 权重 1.0 > INFERRED 0.6）
         if Confidence.EXTRACTED in confs and Confidence.INFERRED in confs:
             assert confs.index(Confidence.EXTRACTED) < confs.index(Confidence.INFERRED)
@@ -263,7 +267,9 @@ def test_search_community_missing_communities_raises(tmp_path: Path) -> None:
 # ══════════════════════════════════════════════════════════════════════
 
 
-def test_cli_search_community_prints_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cli_search_community_prints_summary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """AC #3 CLI：``nanokb search 'kw' --community`` 打印社区摘要。"""
     settings = _build_full_kb(tmp_path)
     # 把 NANOKB_RAW_DIR / NANOKB_OUT_DIR 环境变量指向 tmp_path（CLI _load_settings 读 env）

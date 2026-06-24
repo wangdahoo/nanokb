@@ -50,7 +50,11 @@ def _concept_dict(name: str, description: str, source_file: str) -> dict[str, An
 
 
 def _upsert_record(
-    source_file: str, ts: str, *, triples: list[dict[str, Any]], concepts: list[dict[str, Any]],
+    source_file: str,
+    ts: str,
+    *,
+    triples: list[dict[str, Any]],
+    concepts: list[dict[str, Any]],
     schema_version: str = "2",
 ) -> dict[str, Any]:
     return {
@@ -84,13 +88,19 @@ def test_replay_interleaved_ops_rebuilds_correct_graph(tmp_path: Path) -> None:
     # doc.md 经历三次操作（模拟编译失败后的残留）：
     # ts=1 upsert V1 → ts=2 delete（失败后清理）→ ts=3 upsert V2（最终成功）
     records = [
-        _upsert_record("doc.md", "2026-01-01T00:00:01+00:00",
-                        triples=[_triple_dict("OLD", "rel", "X", "doc.md")],
-                        concepts=[_concept_dict("OLD", "Old version.", "doc.md")]),
+        _upsert_record(
+            "doc.md",
+            "2026-01-01T00:00:01+00:00",
+            triples=[_triple_dict("OLD", "rel", "X", "doc.md")],
+            concepts=[_concept_dict("OLD", "Old version.", "doc.md")],
+        ),
         _delete_record("doc.md", "2026-01-01T00:00:02+00:00"),
-        _upsert_record("doc.md", "2026-01-01T00:00:03+00:00",
-                        triples=[_triple_dict("NEW", "rel", "Y", "doc.md")],
-                        concepts=[_concept_dict("NEW", "New version.", "doc.md")]),
+        _upsert_record(
+            "doc.md",
+            "2026-01-01T00:00:03+00:00",
+            triples=[_triple_dict("NEW", "rel", "Y", "doc.md")],
+            concepts=[_concept_dict("NEW", "New version.", "doc.md")],
+        ),
     ]
     _write_jsonl(out_dir, records)
 
@@ -117,9 +127,12 @@ def test_replay_does_not_consume_llm_tokens(tmp_path: Path) -> None:
     raw_dir.mkdir()
 
     records = [
-        _upsert_record("doc.md", "2026-01-01T00:00:01+00:00",
-                        triples=[_triple_dict("A", "r", "B", "doc.md")],
-                        concepts=[_concept_dict("A", "Entity A.", "doc.md")]),
+        _upsert_record(
+            "doc.md",
+            "2026-01-01T00:00:01+00:00",
+            triples=[_triple_dict("A", "r", "B", "doc.md")],
+            concepts=[_concept_dict("A", "Entity A.", "doc.md")],
+        ),
     ]
     _write_jsonl(out_dir, records)
 
@@ -142,13 +155,19 @@ def test_replay_multiple_files_converge(tmp_path: Path) -> None:
 
     records = [
         # keep.md：upsert → 最终保留
-        _upsert_record("keep.md", "2026-01-01T00:00:01+00:00",
-                        triples=[_triple_dict("K", "r", "V", "keep.md")],
-                        concepts=[_concept_dict("K", "Keep entity.", "keep.md")]),
+        _upsert_record(
+            "keep.md",
+            "2026-01-01T00:00:01+00:00",
+            triples=[_triple_dict("K", "r", "V", "keep.md")],
+            concepts=[_concept_dict("K", "Keep entity.", "keep.md")],
+        ),
         # gone.md：upsert → delete → 最终删除
-        _upsert_record("gone.md", "2026-01-01T00:00:01+00:00",
-                        triples=[_triple_dict("G", "r", "W", "gone.md")],
-                        concepts=[_concept_dict("G", "Gone entity.", "gone.md")]),
+        _upsert_record(
+            "gone.md",
+            "2026-01-01T00:00:01+00:00",
+            triples=[_triple_dict("G", "r", "W", "gone.md")],
+            concepts=[_concept_dict("G", "Gone entity.", "gone.md")],
+        ),
         _delete_record("gone.md", "2026-01-01T00:00:02+00:00"),
     ]
     _write_jsonl(out_dir, records)
@@ -173,9 +192,12 @@ def test_replay_synthesizes_fallback_descriptions(tmp_path: Path) -> None:
 
     # 节点 Bar 仅出现在 triple，无 concept → replay 后 synthesize 兜底
     records = [
-        _upsert_record("doc.md", "2026-01-01T00:00:01+00:00",
-                        triples=[_triple_dict("A", "rel", "Bar", "doc.md")],
-                        concepts=[_concept_dict("A", "Entity A.", "doc.md")]),
+        _upsert_record(
+            "doc.md",
+            "2026-01-01T00:00:01+00:00",
+            triples=[_triple_dict("A", "rel", "Bar", "doc.md")],
+            concepts=[_concept_dict("A", "Entity A.", "doc.md")],
+        ),
     ]
     _write_jsonl(out_dir, records)
 
@@ -197,12 +219,15 @@ def test_replay_produces_manifest_and_graph(tmp_path: Path) -> None:
     raw_dir.mkdir()
 
     records = [
-        _upsert_record("doc.md", "2026-01-01T00:00:01+00:00",
-                        triples=[_triple_dict("A", "r", "B", "doc.md")],
-                        concepts=[
-                            _concept_dict("A", "Entity A.", "doc.md"),
-                            _concept_dict("B", "Entity B.", "doc.md"),
-                        ]),
+        _upsert_record(
+            "doc.md",
+            "2026-01-01T00:00:01+00:00",
+            triples=[_triple_dict("A", "r", "B", "doc.md")],
+            concepts=[
+                _concept_dict("A", "Entity A.", "doc.md"),
+                _concept_dict("B", "Entity B.", "doc.md"),
+            ],
+        ),
     ]
     _write_jsonl(out_dir, records)
 
@@ -226,26 +251,35 @@ def test_replay_after_compile_reproduces_graph(tmp_path: Path) -> None:
 
     settings = _settings(raw_dir, out_dir)
 
-    extract_json = json.dumps({
-        "triples": [
-            {"head": "Transformer", "relation": "uses", "tail": "Attention",
-             "confidence": "EXTRACTED"},
-        ],
-        "concepts": [
-            {"name": "Transformer", "description": "A neural architecture.",
-             "node_type": "concept"},
-            {"name": "Attention", "description": "A focus mechanism.",
-             "node_type": "concept"},
-        ],
-    })
+    extract_json = json.dumps(
+        {
+            "triples": [
+                {
+                    "head": "Transformer",
+                    "relation": "uses",
+                    "tail": "Attention",
+                    "confidence": "EXTRACTED",
+                },
+            ],
+            "concepts": [
+                {
+                    "name": "Transformer",
+                    "description": "A neural architecture.",
+                    "node_type": "concept",
+                },
+                {"name": "Attention", "description": "A focus mechanism.", "node_type": "concept"},
+            ],
+        }
+    )
 
     class _LocalFakeLLM:
         def __init__(self, resp: str) -> None:
             self._resp = resp
             self.calls = 0
 
-        def complete(self, system: str, user: str,
-                     response_format: str = "json", temperature: float = 0.0) -> str:
+        def complete(
+            self, system: str, user: str, response_format: str = "json", temperature: float = 0.0
+        ) -> str:
             self.calls += 1
             return self._resp
 

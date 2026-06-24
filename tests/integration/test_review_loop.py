@@ -89,8 +89,7 @@ def _review_path(settings: Settings) -> Path:
 
 def test_low_hit_count_appends_review_entry(tmp_path: Path) -> None:
     triples = [
-        {"head": "Transformer", "relation": "uses", "tail": "Attention",
-         "confidence": "EXTRACTED"},
+        {"head": "Transformer", "relation": "uses", "tail": "Attention", "confidence": "EXTRACTED"},
     ]
     concepts = [
         {"name": "Transformer", "description": "A model.", "node_type": "model"},
@@ -123,13 +122,13 @@ def test_low_confidence_score_appends_review_entry(tmp_path: Path) -> None:
         {"head": "Foo", "relation": "rel2", "tail": "Baz", "confidence": "EXTRACTED"},
         {"head": "Foo", "relation": "rel3", "tail": "Qux", "confidence": "EXTRACTED"},
     ]
-    concepts = [{"name": c, "description": f"{c} desc.", "node_type": "concept"}
-                for c in ("Foo", "Bar", "Baz", "Qux")]
+    concepts = [
+        {"name": c, "description": f"{c} desc.", "node_type": "concept"}
+        for c in ("Foo", "Bar", "Baz", "Qux")
+    ]
     settings = _build_kb(tmp_path, triples, concepts)
     # count 充足（3 hits）；min_confidence_score 设为超出任意 fusion 分数 → 触发
-    settings = settings.model_copy(
-        update={"min_hit_count": 2, "min_confidence_score": 1.5}
-    )
+    settings = settings.model_copy(update={"min_hit_count": 2, "min_confidence_score": 1.5})
 
     ner = json.dumps({"entities": ["Foo"]})
     gen = "answer^[doc.md]"
@@ -150,8 +149,7 @@ def test_low_confidence_score_appends_review_entry(tmp_path: Path) -> None:
 def test_ambiguous_conflict_edge_appends_review_entry(tmp_path: Path) -> None:
     triples = [
         {"head": "Alpha", "relation": "uses", "tail": "Beta", "confidence": "EXTRACTED"},
-        {"head": "Alpha", "relation": "might_use", "tail": "Gamma",
-         "confidence": "AMBIGUOUS"},
+        {"head": "Alpha", "relation": "might_use", "tail": "Gamma", "confidence": "AMBIGUOUS"},
     ]
     concepts = [
         {"name": "Alpha", "description": "Alpha entity.", "node_type": "concept"},
@@ -160,9 +158,7 @@ def test_ambiguous_conflict_edge_appends_review_entry(tmp_path: Path) -> None:
     ]
     settings = _build_kb(tmp_path, triples, concepts)
     # count 与 score 均放宽，确保唯一触发条件为 AMBIGUOUS
-    settings = settings.model_copy(
-        update={"min_hit_count": 1, "min_confidence_score": 0.0}
-    )
+    settings = settings.model_copy(update={"min_hit_count": 1, "min_confidence_score": 0.0})
 
     ner = json.dumps({"entities": ["Alpha"]})
     gen = "answer^[doc.md]"
@@ -171,10 +167,7 @@ def test_ambiguous_conflict_edge_appends_review_entry(tmp_path: Path) -> None:
     result = pipeline.answer_query(settings, "Alpha 用了什么？", llm=llm)
 
     # hits 含 AMBIGUOUS 三元组
-    assert any(
-        h.triple is not None and h.triple.confidence == "AMBIGUOUS"
-        for h in result.hits
-    )
+    assert any(h.triple is not None and h.triple.confidence == "AMBIGUOUS" for h in result.hits)
     assert result.answer.review_flagged is True
     entries = ReviewQueue(settings.out_dir).list_pending()
     assert len(entries) == 1
@@ -192,9 +185,7 @@ def test_review_command_lists_pending_entries(tmp_path: Path) -> None:
     queue.append("问题一", "low_hit_count", "A, B", "ts1")
     queue.append("问题二", "ambiguous_conflict", "C", "ts2")
 
-    result = runner.invoke(
-        app, ["review"], env={"NANOKB_OUT_DIR": str(out_dir)}
-    )
+    result = runner.invoke(app, ["review"], env={"NANOKB_OUT_DIR": str(out_dir)})
 
     assert result.exit_code == 0
     assert "2" in result.stdout
@@ -206,9 +197,7 @@ def test_review_command_lists_pending_entries(tmp_path: Path) -> None:
 def test_review_command_empty_queue_message(tmp_path: Path) -> None:
     out_dir = tmp_path / "out"
     out_dir.mkdir()
-    result = runner.invoke(
-        app, ["review"], env={"NANOKB_OUT_DIR": str(out_dir)}
-    )
+    result = runner.invoke(app, ["review"], env={"NANOKB_OUT_DIR": str(out_dir)})
     assert result.exit_code == 0
     assert "空" in result.stdout
 
@@ -224,9 +213,7 @@ def test_review_clear_empties_queue(tmp_path: Path) -> None:
     queue.append("问题二", "low_hit_count", "B", "ts2")
     assert queue.list_pending()
 
-    result = runner.invoke(
-        app, ["review", "--clear"], env={"NANOKB_OUT_DIR": str(out_dir)}
-    )
+    result = runner.invoke(app, ["review", "--clear"], env={"NANOKB_OUT_DIR": str(out_dir)})
 
     assert result.exit_code == 0
     assert _review_path(Settings(out_dir=out_dir)).read_text(encoding="utf-8") == ""
@@ -253,8 +240,6 @@ def test_query_then_review_end_to_end(tmp_path: Path) -> None:
     llm = FakeLLMClient(responses=[ner, gen])
     pipeline.answer_query(settings, "Foo 是什么？", llm=llm)
 
-    result = runner.invoke(
-        app, ["review"], env={"NANOKB_OUT_DIR": str(settings.out_dir)}
-    )
+    result = runner.invoke(app, ["review"], env={"NANOKB_OUT_DIR": str(settings.out_dir)})
     assert result.exit_code == 0
     assert "Foo 是什么？" in result.stdout

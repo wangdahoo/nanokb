@@ -174,14 +174,12 @@ class VectorStore:
                 ids=[node_id for node_id, _, _, _ in batch],
                 embeddings=[list(map(float, e)) for e in embeddings],
                 documents=[desc for _, _, _, desc in batch],
-                metadatas=[
-                    {"source_file": sf, "node": node}
-                    for _, sf, node, _ in batch
-                ],
+                metadatas=[{"source_file": sf, "node": node} for _, sf, node, _ in batch],
             )
 
         logger.info(
-            "index_nodes: upserted %d node vectors", len(items),
+            "index_nodes: upserted %d node vectors",
+            len(items),
             extra={"stage": "vector-store"},
         )
 
@@ -195,7 +193,8 @@ class VectorStore:
             raise RuntimeError("collection not initialized; call _ensure_collection first")
         col.delete(where={"source_file": source_file})
         logger.debug(
-            "delete_by_source(%s)", source_file,
+            "delete_by_source(%s)",
+            source_file,
             extra={"stage": "vector-store", "file": source_file},
         )
 

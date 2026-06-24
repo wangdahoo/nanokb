@@ -109,9 +109,7 @@ def make_llm_client(settings: Settings) -> LLMClient:
     if provider == "openai":
         key = settings.openai_api_key
         if key is None or not key.get_secret_value():
-            logger.error(
-                "openai_api_key is required when llm_provider='openai'; refusing to start"
-            )
+            logger.error("openai_api_key is required when llm_provider='openai'; refusing to start")
             raise SystemExit(2)
         from nanokb.llm.openai_client import OpenAIClient
 
@@ -139,9 +137,7 @@ def make_llm_client(settings: Settings) -> LLMClient:
             model=settings.llm_model,
             embedding_model=settings.embedding_model,
             openai_api_key=(
-                settings.openai_api_key.get_secret_value()
-                if settings.openai_api_key
-                else None
+                settings.openai_api_key.get_secret_value() if settings.openai_api_key else None
             ),
             openai_base_url=settings.openai_base_url,
         )

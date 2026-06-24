@@ -50,9 +50,7 @@ def _count_documents(raw_dir: Path) -> int:
     if not raw_dir.exists():
         return 0
     return sum(
-        1
-        for p in raw_dir.rglob("*")
-        if p.is_file() and p.suffix.lower() in _SUPPORTED_SUFFIXES
+        1 for p in raw_dir.rglob("*") if p.is_file() and p.suffix.lower() in _SUPPORTED_SUFFIXES
     )
 
 
@@ -211,9 +209,7 @@ def query(
     setup_logging(settings.out_dir)
     progress = RichProgressReporter(console)
     try:
-        result = pipeline.answer_query(
-            settings, question, mode="query", progress=progress
-        )
+        result = pipeline.answer_query(settings, question, mode="query", progress=progress)
     except pipeline.ColdStartError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from exc
@@ -231,9 +227,7 @@ def query(
                 unique.append(cite)
         console.print(f"\n[dim]引用来源：{', '.join(unique)}[/dim]")
     elif result.hits:
-        sources: set[str] = {
-            h.triple.source_file for h in result.hits if h.triple is not None
-        }
+        sources: set[str] = {h.triple.source_file for h in result.hits if h.triple is not None}
         if sources:
             console.print(f"\n[dim]引用来源：{', '.join(sorted(sources))}[/dim]")
 
@@ -247,9 +241,7 @@ def ask(
     setup_logging(settings.out_dir)
     progress = RichProgressReporter(console)
     try:
-        result = pipeline.answer_query(
-            settings, question, mode="ask", progress=progress
-        )
+        result = pipeline.answer_query(settings, question, mode="ask", progress=progress)
     except pipeline.ColdStartError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from exc
@@ -271,9 +263,7 @@ def ask(
 @app.command()
 def search(
     keyword: str = typer.Argument(..., help="检索关键词。"),
-    community: bool = typer.Option(
-        False, "--community", help="社区宏观检索（返回所属社区摘要）。"
-    ),
+    community: bool = typer.Option(False, "--community", help="社区宏观检索（返回所属社区摘要）。"),
 ) -> None:
     """社区路宏观检索（按关键词返回所属社区摘要）。
 
@@ -346,8 +336,7 @@ def review(
     for idx, entry in enumerate(entries, 1):
         console.print(f"{idx}. {entry.question}")
         console.print(
-            f"   [dim]原因：{entry.reason} | 实体：{entry.entities} | "
-            f"时间：{entry.timestamp}[/dim]"
+            f"   [dim]原因：{entry.reason} | 实体：{entry.entities} | 时间：{entry.timestamp}[/dim]"
         )
 
 

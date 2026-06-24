@@ -147,9 +147,7 @@ def test_zero_overlap_chunks_are_disjoint() -> None:
     assert len(chunks) >= 2
     total = sum(c.token_count for c in chunks)
     original = count_tokens(content, MODEL)
-    assert total == original, (
-        f"zero-overlap sum ({total}) should equal original ({original})"
-    )
+    assert total == original, f"zero-overlap sum ({total}) should equal original ({original})"
 
 
 # --------------------------------------------------------------------------- #

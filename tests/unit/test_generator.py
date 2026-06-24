@@ -66,9 +66,7 @@ def _hit(triple: Triple, score: float = 1.0) -> RetrievalHit:
 
 
 def test_generate_returns_answer_with_citation() -> None:
-    hits = [
-        _hit(_triple("Transformer", "uses", "Attention", Confidence.EXTRACTED))
-    ]
+    hits = [_hit(_triple("Transformer", "uses", "Attention", Confidence.EXTRACTED))]
     response = "Transformer 通过 self-attention 依赖 Attention^[doc.md]。"
     llm = FakeLLMClient(response=response)
     settings = Settings()

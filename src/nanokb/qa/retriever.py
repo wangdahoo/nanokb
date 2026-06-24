@@ -65,7 +65,7 @@ _VECTOR_SEARCH_K: int = 10
 _NER_SYSTEM_PROMPT = (
     "You are an entity recognizer. Read the user's question and extract all "
     "entity mentions as STRICT JSON.\n\n"
-    'Output schema (return ONLY this object, no markdown fences, no prose):\n'
+    "Output schema (return ONLY this object, no markdown fences, no prose):\n"
     '{"entities": ["Entity One", "Entity Two"]}\n'
     "\n"
     "Rules:\n"
@@ -182,9 +182,7 @@ class GraphRetriever:
                 seeds.update(norm_index[norm])
                 continue
             if cutoff > 0.0 and all_norms:
-                matches = difflib.get_close_matches(
-                    norm, all_norms, n=3, cutoff=cutoff
-                )
+                matches = difflib.get_close_matches(norm, all_norms, n=3, cutoff=cutoff)
                 for m in matches:
                     seeds.update(norm_index[m])
         return seeds
@@ -337,9 +335,7 @@ class VectorRetriever:
         ``VectorStore.search`` 失败（如 collection 损坏）时降级为空召回，不阻塞融合。
         """
         try:
-            hits = self._vector_store.search(
-                question, k=_VECTOR_SEARCH_K, llm=self._llm
-            )
+            hits = self._vector_store.search(question, k=_VECTOR_SEARCH_K, llm=self._llm)
         except Exception:
             logger.warning(
                 "vector recall failed; degrading to empty",

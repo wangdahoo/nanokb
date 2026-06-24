@@ -213,8 +213,7 @@ class GraphBuilder:
         keys_to_remove = [
             key
             for key, data in graph[head][tail].items()
-            if data.get("relation") == relation
-            and data.get("source_file") == source_file
+            if data.get("relation") == relation and data.get("source_file") == source_file
         ]
         for key in keys_to_remove:
             graph.remove_edge(head, tail, key=key)

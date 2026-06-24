@@ -62,9 +62,7 @@ class LoaderRegistry:
         for loader in self._loaders:
             if loader.supports(path):
                 return loader.load(path)
-        raise UnsupportedFormatError(
-            f"no registered loader supports this file: {path}"
-        )
+        raise UnsupportedFormatError(f"no registered loader supports this file: {path}")
 
 
 __all__ = ["DocumentLoader", "LoaderRegistry", "UnsupportedFormatError"]

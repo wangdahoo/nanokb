@@ -61,10 +61,21 @@ def _write_jsonl(out_dir: Path, records: list[dict[str, Any]]) -> None:
 def test_upsert_then_delete_final_is_delete() -> None:
     """upsert(ts=1) → delete(ts=2)：最终态为 delete。"""
     records = [
-        _record("doc.md", "upsert", "2026-01-01T00:00:01+00:00",
-                triples=[{"head": "A", "relation": "r", "tail": "B",
-                          "confidence": "EXTRACTED", "source_file": "doc.md",
-                          "track": "semantic"}]),
+        _record(
+            "doc.md",
+            "upsert",
+            "2026-01-01T00:00:01+00:00",
+            triples=[
+                {
+                    "head": "A",
+                    "relation": "r",
+                    "tail": "B",
+                    "confidence": "EXTRACTED",
+                    "source_file": "doc.md",
+                    "track": "semantic",
+                }
+            ],
+        ),
         _record("doc.md", "delete", "2026-01-01T00:00:02+00:00"),
     ]
     converged = pipeline._dedup_converge(records)
@@ -75,10 +86,21 @@ def test_delete_then_upsert_final_is_upsert() -> None:
     """delete(ts=1) → upsert(ts=2)：最终态为 upsert。"""
     records = [
         _record("doc.md", "delete", "2026-01-01T00:00:01+00:00"),
-        _record("doc.md", "upsert", "2026-01-01T00:00:02+00:00",
-                triples=[{"head": "A", "relation": "r", "tail": "B",
-                          "confidence": "EXTRACTED", "source_file": "doc.md",
-                          "track": "semantic"}]),
+        _record(
+            "doc.md",
+            "upsert",
+            "2026-01-01T00:00:02+00:00",
+            triples=[
+                {
+                    "head": "A",
+                    "relation": "r",
+                    "tail": "B",
+                    "confidence": "EXTRACTED",
+                    "source_file": "doc.md",
+                    "track": "semantic",
+                }
+            ],
+        ),
     ]
     converged = pipeline._dedup_converge(records)
     assert converged["doc.md"]["op"] == "upsert"
@@ -87,14 +109,36 @@ def test_delete_then_upsert_final_is_upsert() -> None:
 def test_upsert_upsert_keeps_latest_ts() -> None:
     """upsert(ts=1) → upsert(ts=2)：最终态为 ts=2 的 upsert。"""
     records = [
-        _record("doc.md", "upsert", "2026-01-01T00:00:01+00:00",
-                triples=[{"head": "OLD", "relation": "r", "tail": "B",
-                          "confidence": "EXTRACTED", "source_file": "doc.md",
-                          "track": "semantic"}]),
-        _record("doc.md", "upsert", "2026-01-01T00:00:02+00:00",
-                triples=[{"head": "NEW", "relation": "r", "tail": "B",
-                          "confidence": "EXTRACTED", "source_file": "doc.md",
-                          "track": "semantic"}]),
+        _record(
+            "doc.md",
+            "upsert",
+            "2026-01-01T00:00:01+00:00",
+            triples=[
+                {
+                    "head": "OLD",
+                    "relation": "r",
+                    "tail": "B",
+                    "confidence": "EXTRACTED",
+                    "source_file": "doc.md",
+                    "track": "semantic",
+                }
+            ],
+        ),
+        _record(
+            "doc.md",
+            "upsert",
+            "2026-01-01T00:00:02+00:00",
+            triples=[
+                {
+                    "head": "NEW",
+                    "relation": "r",
+                    "tail": "B",
+                    "confidence": "EXTRACTED",
+                    "source_file": "doc.md",
+                    "track": "semantic",
+                }
+            ],
+        ),
     ]
     converged = pipeline._dedup_converge(records)
     final = converged["doc.md"]
@@ -115,14 +159,36 @@ def test_same_ts_keeps_highest_schema_version() -> None:
 def test_multiple_files_converge_independently() -> None:
     """多文件独立收敛：f1 最终 upsert，f2 最终 delete。"""
     records = [
-        _record("f1.md", "upsert", "2026-01-01T00:00:01+00:00",
-                triples=[{"head": "A", "relation": "r", "tail": "B",
-                          "confidence": "EXTRACTED", "source_file": "f1.md",
-                          "track": "semantic"}]),
-        _record("f2.md", "upsert", "2026-01-01T00:00:01+00:00",
-                triples=[{"head": "C", "relation": "r", "tail": "D",
-                          "confidence": "EXTRACTED", "source_file": "f2.md",
-                          "track": "semantic"}]),
+        _record(
+            "f1.md",
+            "upsert",
+            "2026-01-01T00:00:01+00:00",
+            triples=[
+                {
+                    "head": "A",
+                    "relation": "r",
+                    "tail": "B",
+                    "confidence": "EXTRACTED",
+                    "source_file": "f1.md",
+                    "track": "semantic",
+                }
+            ],
+        ),
+        _record(
+            "f2.md",
+            "upsert",
+            "2026-01-01T00:00:01+00:00",
+            triples=[
+                {
+                    "head": "C",
+                    "relation": "r",
+                    "tail": "D",
+                    "confidence": "EXTRACTED",
+                    "source_file": "f2.md",
+                    "track": "semantic",
+                }
+            ],
+        ),
         _record("f2.md", "delete", "2026-01-01T00:00:02+00:00"),
     ]
     converged = pipeline._dedup_converge(records)
@@ -133,15 +199,37 @@ def test_multiple_files_converge_independently() -> None:
 def test_interleaved_upsert_delete_upsert_final_is_last_upsert() -> None:
     """交错 upsert → delete → upsert（模拟失败残留）：最终态为最后一条 upsert。"""
     records = [
-        _record("doc.md", "upsert", "2026-01-01T00:00:01+00:00",
-                triples=[{"head": "V1", "relation": "r", "tail": "B",
-                          "confidence": "EXTRACTED", "source_file": "doc.md",
-                          "track": "semantic"}]),
+        _record(
+            "doc.md",
+            "upsert",
+            "2026-01-01T00:00:01+00:00",
+            triples=[
+                {
+                    "head": "V1",
+                    "relation": "r",
+                    "tail": "B",
+                    "confidence": "EXTRACTED",
+                    "source_file": "doc.md",
+                    "track": "semantic",
+                }
+            ],
+        ),
         _record("doc.md", "delete", "2026-01-01T00:00:02+00:00"),
-        _record("doc.md", "upsert", "2026-01-01T00:00:03+00:00",
-                triples=[{"head": "V3", "relation": "r", "tail": "B",
-                          "confidence": "EXTRACTED", "source_file": "doc.md",
-                          "track": "semantic"}]),
+        _record(
+            "doc.md",
+            "upsert",
+            "2026-01-01T00:00:03+00:00",
+            triples=[
+                {
+                    "head": "V3",
+                    "relation": "r",
+                    "tail": "B",
+                    "confidence": "EXTRACTED",
+                    "source_file": "doc.md",
+                    "track": "semantic",
+                }
+            ],
+        ),
     ]
     converged = pipeline._dedup_converge(records)
     final = converged["doc.md"]
@@ -188,17 +276,30 @@ def test_replay_rebuilds_from_converged_upsert(tmp_path: Path) -> None:
     """replay 从去重收敛后的 upsert 记录重建图谱。"""
     records = [
         _record(
-            "doc.md", "upsert", "2026-01-01T00:00:01+00:00",
-            triples=[{
-                "head": "Transformer", "relation": "uses", "tail": "Attention",
-                "confidence": "EXTRACTED", "source_file": "doc.md",
-                "track": "semantic", "chunk_index": 0,
-            }],
-            concepts=[{
-                "name": "Transformer", "description": "A neural architecture.",
-                "source_file": "doc.md", "confidence": "EXTRACTED",
-                "node_type": "concept", "extra": {},
-            }],
+            "doc.md",
+            "upsert",
+            "2026-01-01T00:00:01+00:00",
+            triples=[
+                {
+                    "head": "Transformer",
+                    "relation": "uses",
+                    "tail": "Attention",
+                    "confidence": "EXTRACTED",
+                    "source_file": "doc.md",
+                    "track": "semantic",
+                    "chunk_index": 0,
+                }
+            ],
+            concepts=[
+                {
+                    "name": "Transformer",
+                    "description": "A neural architecture.",
+                    "source_file": "doc.md",
+                    "confidence": "EXTRACTED",
+                    "node_type": "concept",
+                    "extra": {},
+                }
+            ],
         ),
     ]
     _write_jsonl(tmp_path, records)
@@ -211,6 +312,7 @@ def test_replay_rebuilds_from_converged_upsert(tmp_path: Path) -> None:
 
     # graph.json 存在且含正确节点/边
     import networkx as nx
+
     graph_data = json.loads((tmp_path / "graph.json").read_text(encoding="utf-8"))
     graph = nx.node_link_graph(graph_data, directed=True, multigraph=True)
     assert graph.has_edge("Transformer", "Attention")
@@ -221,19 +323,35 @@ def test_replay_skips_files_whose_final_op_is_delete(tmp_path: Path) -> None:
     """replay 跳过最终态为 delete 的文件（不参与重建）。"""
     records = [
         _record(
-            "keep.md", "upsert", "2026-01-01T00:00:01+00:00",
-            triples=[{
-                "head": "A", "relation": "r", "tail": "B",
-                "confidence": "EXTRACTED", "source_file": "keep.md",
-                "track": "semantic",
-            }],
-        ),
-        _record("gone.md", "upsert", "2026-01-01T00:00:01+00:00",
-                triples=[{
-                    "head": "X", "relation": "r", "tail": "Y",
-                    "confidence": "EXTRACTED", "source_file": "gone.md",
+            "keep.md",
+            "upsert",
+            "2026-01-01T00:00:01+00:00",
+            triples=[
+                {
+                    "head": "A",
+                    "relation": "r",
+                    "tail": "B",
+                    "confidence": "EXTRACTED",
+                    "source_file": "keep.md",
                     "track": "semantic",
-                }]),
+                }
+            ],
+        ),
+        _record(
+            "gone.md",
+            "upsert",
+            "2026-01-01T00:00:01+00:00",
+            triples=[
+                {
+                    "head": "X",
+                    "relation": "r",
+                    "tail": "Y",
+                    "confidence": "EXTRACTED",
+                    "source_file": "gone.md",
+                    "track": "semantic",
+                }
+            ],
+        ),
         _record("gone.md", "delete", "2026-01-01T00:00:02+00:00"),
     ]
     _write_jsonl(tmp_path, records)
@@ -245,6 +363,7 @@ def test_replay_skips_files_whose_final_op_is_delete(tmp_path: Path) -> None:
     assert result.deleted_files == ["gone.md"]
 
     import networkx as nx
+
     graph_data = json.loads((tmp_path / "graph.json").read_text(encoding="utf-8"))
     graph = nx.node_link_graph(graph_data, directed=True, multigraph=True)
     assert graph.has_edge("A", "B")

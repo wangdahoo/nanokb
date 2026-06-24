@@ -168,9 +168,7 @@ def _symmetrize(di_graph: nx.DiGraph, *, strategy: str = "sum") -> nx.Graph:
     return und
 
 
-def _run_leiden(
-    undirected: nx.Graph, original_nodes: list[str]
-) -> list[int]:
+def _run_leiden(undirected: nx.Graph, original_nodes: list[str]) -> list[int]:
     """NetworkX → igraph + leidenalg ModularityVertexPartition。
 
     节点顺序映射保留：``original_nodes[i]`` 对应 igraph 节点 ``i``，membership[i]

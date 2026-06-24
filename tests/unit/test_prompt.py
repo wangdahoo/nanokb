@@ -109,10 +109,7 @@ def test_multiple_hits_joined_with_header() -> None:
 
 def test_context_truncated_to_max_tokens() -> None:
     # 构造 5 条 hit，限制 max_context_tokens 仅能容纳 header + 1 条 hit
-    hits = [
-        _triple_hit("Alpha", "rel", "Beta", f"f{i}.md")
-        for i in range(5)
-    ]
+    hits = [_triple_hit("Alpha", "rel", "Beta", f"f{i}.md") for i in range(5)]
     # header "已知知识点：" = 12 chars // 4 = 3 tokens
     # 每条 hit line ~ 30+ chars // 4 ~ 8 tokens
     # 设 max=12 → header(3) + 1 hit(8) = 11 ≤ 12，第 2 hit 8 > (12-11)=1，break

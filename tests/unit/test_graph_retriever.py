@@ -57,8 +57,12 @@ def _build_graph() -> nx.MultiDiGraph:
     """构造测试图：Transformer--uses-->Attention, Transformer--is_a-->Model。"""
     g = nx.MultiDiGraph()
     g.add_node("Transformer", description="A model.", source_file="doc.md", confidence="EXTRACTED")
-    g.add_node("Attention", description="A mechanism.", source_file="doc.md", confidence="EXTRACTED")
-    g.add_node("Model", description="A model category.", source_file="doc.md", confidence="EXTRACTED")
+    g.add_node(
+        "Attention", description="A mechanism.", source_file="doc.md", confidence="EXTRACTED"
+    )
+    g.add_node(
+        "Model", description="A model category.", source_file="doc.md", confidence="EXTRACTED"
+    )
     g.add_edge(
         "Transformer",
         "Attention",
@@ -238,6 +242,7 @@ def test_inferred_edge_score_raw_similarity_confidence_in_triple() -> None:
     assert by_rel_score["is_a"] == 1.0
     # confidence 差异保留在 triple 上（fuse 据此加权排序）
     from nanokb.models import Confidence
+
     assert by_rel_conf["uses"] == Confidence.EXTRACTED
     assert by_rel_conf["is_a"] == Confidence.INFERRED
 
@@ -246,9 +251,7 @@ def test_hits_carry_source_file_from_edge_data() -> None:
     g = nx.MultiDiGraph()
     g.add_node("X", description="X", source_file="x.md", confidence="EXTRACTED")
     g.add_node("Y", description="Y", source_file="x.md", confidence="EXTRACTED")
-    g.add_edge(
-        "X", "Y", relation="rel", source_file="custom.md", confidence="EXTRACTED"
-    )
+    g.add_edge("X", "Y", relation="rel", source_file="custom.md", confidence="EXTRACTED")
     llm = FakeLLMClient(responses=[_ner_response(["X"])])
     retriever = GraphRetriever(g, llm, Settings())
 

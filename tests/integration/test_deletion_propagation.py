@@ -65,29 +65,31 @@ def _settings(raw_dir: Path, out_dir: Path, **kwargs: Any) -> Settings:
 
 
 def _doc_a_response() -> str:
-    return json.dumps({
-        "triples": [
-            {"head": "Foo", "relation": "rel", "tail": "Bar",
-             "confidence": "EXTRACTED"},
-        ],
-        "concepts": [
-            {"name": "Foo", "description": "Entity Foo.", "node_type": "concept"},
-            {"name": "Bar", "description": "Entity Bar.", "node_type": "concept"},
-        ],
-    })
+    return json.dumps(
+        {
+            "triples": [
+                {"head": "Foo", "relation": "rel", "tail": "Bar", "confidence": "EXTRACTED"},
+            ],
+            "concepts": [
+                {"name": "Foo", "description": "Entity Foo.", "node_type": "concept"},
+                {"name": "Bar", "description": "Entity Bar.", "node_type": "concept"},
+            ],
+        }
+    )
 
 
 def _doc_b_response() -> str:
-    return json.dumps({
-        "triples": [
-            {"head": "Baz", "relation": "rel", "tail": "Bar",
-             "confidence": "EXTRACTED"},
-        ],
-        "concepts": [
-            {"name": "Baz", "description": "Entity Baz.", "node_type": "concept"},
-            {"name": "Bar", "description": "Shared entity Bar.", "node_type": "concept"},
-        ],
-    })
+    return json.dumps(
+        {
+            "triples": [
+                {"head": "Baz", "relation": "rel", "tail": "Bar", "confidence": "EXTRACTED"},
+            ],
+            "concepts": [
+                {"name": "Baz", "description": "Entity Baz.", "node_type": "concept"},
+                {"name": "Bar", "description": "Shared entity Bar.", "node_type": "concept"},
+            ],
+        }
+    )
 
 
 # ── AC #3：删除传播 ─────────────────────────────────────────────────
@@ -138,14 +140,11 @@ def test_delete_file_propagates_to_graph_and_triples(tmp_path: Path) -> None:
 
     # triples.jsonl 含 delete 标记
     lines = [
-        line for line in
-        (out_dir / "triples.jsonl").read_text(encoding="utf-8").splitlines()
+        line
+        for line in (out_dir / "triples.jsonl").read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
-    delete_records = [
-        json.loads(line) for line in lines
-        if json.loads(line)["op"] == "delete"
-    ]
+    delete_records = [json.loads(line) for line in lines if json.loads(line)["op"] == "delete"]
     assert any(r["source_file"] == "a.md" for r in delete_records)
     assert all(r["schema_version"] for r in delete_records)
 

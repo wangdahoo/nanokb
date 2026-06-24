@@ -74,9 +74,7 @@ def test_make_ollama_client() -> None:
 
 
 def test_factory_returns_three_distinct_provider_types() -> None:
-    openai_client = make_llm_client(
-        Settings(llm_provider="openai", openai_api_key="sk-fake")
-    )
+    openai_client = make_llm_client(Settings(llm_provider="openai", openai_api_key="sk-fake"))
     anthropic_client = make_llm_client(
         Settings(llm_provider="anthropic", anthropic_api_key="sk-ant-fake")
     )
@@ -253,8 +251,6 @@ def test_client_construction_is_offline_safe(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(tiktoken, "get_encoding", spy_get_encoding)
 
     OpenAIClient(api_key="sk-fake", model="gpt-4o-mini", embedding_model="x")
-    AnthropicClient(
-        api_key="sk-ant-fake", model="claude-3-5-sonnet-20241022", embedding_model="x"
-    )
+    AnthropicClient(api_key="sk-ant-fake", model="claude-3-5-sonnet-20241022", embedding_model="x")
     OllamaClient(base_url="http://localhost:11434", model="llama3", embedding_model="x")
     assert calls == []  # 构造期零调用，下载延迟到 count_tokens

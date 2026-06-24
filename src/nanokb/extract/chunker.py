@@ -44,9 +44,7 @@ def chunk_text(
     if overlap_tokens < 0:
         raise ValueError(f"overlap_tokens must be non-negative, got {overlap_tokens}")
     if overlap_tokens >= max_tokens:
-        raise ValueError(
-            f"overlap_tokens ({overlap_tokens}) must be < max_tokens ({max_tokens})"
-        )
+        raise ValueError(f"overlap_tokens ({overlap_tokens}) must be < max_tokens ({max_tokens})")
 
     if not content:
         return []
@@ -56,9 +54,7 @@ def chunk_text(
 
     # 短文本：单块，保留原文不经 decode（避免 BPE 边界导致的微小文本差异）
     if len(tokens) <= max_tokens:
-        return [
-            Chunk(index=0, text=content, token_count=len(tokens), source_file=source_file)
-        ]
+        return [Chunk(index=0, text=content, token_count=len(tokens), source_file=source_file)]
 
     # 长文本：按 stride 步进切片
     stride = max_tokens - overlap_tokens

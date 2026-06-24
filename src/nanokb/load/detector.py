@@ -77,9 +77,7 @@ def _iter_supported_files(root: Path) -> list[Path]:
     if not root.exists():
         return []
     return sorted(
-        p
-        for p in root.rglob("*")
-        if p.is_file() and p.suffix.lower() in SUPPORTED_SUFFIXES
+        p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in SUPPORTED_SUFFIXES
     )
 
 
@@ -130,9 +128,7 @@ def detect_changes(raw_dir: Path, manifest: Manifest, settings: Settings) -> Cha
             modified.append(rel_key)
 
     # deleted：manifest 有记录但磁盘不存在
-    deleted: list[str] = [
-        rel_key for rel_key in manifest.files if rel_key not in current_keys
-    ]
+    deleted: list[str] = [rel_key for rel_key in manifest.files if rel_key not in current_keys]
 
     return ChangeSet(
         added=sorted(added),

@@ -128,9 +128,7 @@ def test_throttle_enforces_min_interval(monkeypatch: pytest.MonkeyPatch) -> None
         embedding_model="x",
         request_interval=2.0,
     )
-    client._client.chat.completions.create = MagicMock(
-        return_value=_make_chat_response()
-    )
+    client._client.chat.completions.create = MagicMock(return_value=_make_chat_response())
 
     sleep_calls: list[float] = []
     monkeypatch.setattr(time, "sleep", lambda s: sleep_calls.append(s))
@@ -155,9 +153,7 @@ def test_throttle_skips_when_interval_zero(
         embedding_model="x",
         request_interval=0.0,
     )
-    client._client.chat.completions.create = MagicMock(
-        return_value=_make_chat_response()
-    )
+    client._client.chat.completions.create = MagicMock(return_value=_make_chat_response())
 
     sleep_calls: list[float] = []
     monkeypatch.setattr(time, "sleep", lambda s: sleep_calls.append(s))

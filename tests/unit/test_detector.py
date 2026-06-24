@@ -156,13 +156,9 @@ def test_embedding_model_change_triggers_modified(tmp_path: Path) -> None:
     p = _write(raw_dir, "a.md")
 
     manifest = Manifest()
-    manifest.files["a.md"] = _file_state(
-        p, raw_dir, embedding_model="text-embedding-3-small"
-    )
+    manifest.files["a.md"] = _file_state(p, raw_dir, embedding_model="text-embedding-3-small")
 
-    changes = detect_changes(
-        raw_dir, manifest, _settings(embedding_model="text-embedding-3-large")
-    )
+    changes = detect_changes(raw_dir, manifest, _settings(embedding_model="text-embedding-3-large"))
 
     assert "a.md" in changes.modified
 
@@ -486,9 +482,7 @@ def test_watch_queue_close_sends_sentinel() -> None:
 def test_watch_queue_moved_event_tracks_dest_path() -> None:
     """moved 事件追踪 dest_path（新位置作为 added 处理）。"""
     wq = WatchQueue(debounce_seconds=0.01)
-    wq.on_any_event(
-        _FakeEvent("/raw/old.md", event_type="moved", dest_path="/raw/new.md")
-    )
+    wq.on_any_event(_FakeEvent("/raw/old.md", event_type="moved", dest_path="/raw/new.md"))
 
     time.sleep(0.05)
 
@@ -564,8 +558,7 @@ def test_start_watch_single_worker_consumes_serially(tmp_path: Path) -> None:
     with processed_lock:
         assert sorted(processed) == sorted(f"/{raw_dir.name}/{n}" for n in files) or (
             # watchdog 可能以绝对或相对路径回调；只验证文件名都在
-            all(n in "/".join(processed) for n in files)
-            and len(processed) == len(files)
+            all(n in "/".join(processed) for n in files) and len(processed) == len(files)
         )
 
     # 核心断言：无并发执行

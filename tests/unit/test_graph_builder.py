@@ -79,9 +79,7 @@ def _result(
     )
 
 
-def _edges_with_data(
-    graph: nx.MultiDiGraph, u: str, v: str
-) -> list[dict[str, object]]:
+def _edges_with_data(graph: nx.MultiDiGraph, u: str, v: str) -> list[dict[str, object]]:
     """返回 u→v 的全部 multi-edge data（按 key 升序）。"""
     if not graph.has_edge(u, v):
         return []

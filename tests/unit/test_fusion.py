@@ -132,9 +132,9 @@ def test_fuse_weights_extracted_above_inferred_above_ambiguous() -> None:
     fused = fuse(hits, settings, llm)
 
     assert len(fused) == 3
-    assert fused[0].triple.relation == "ext"   # EXTRACTED, weighted 0.5
-    assert fused[1].triple.relation == "inf"   # INFERRED, weighted 0.3
-    assert fused[2].triple.relation == "amb"   # AMBIGUOUS, weighted 0.15
+    assert fused[0].triple.relation == "ext"  # EXTRACTED, weighted 0.5
+    assert fused[1].triple.relation == "inf"  # INFERRED, weighted 0.3
+    assert fused[2].triple.relation == "amb"  # AMBIGUOUS, weighted 0.15
 
 
 def test_fuse_extracted_ranks_before_ambiguous_even_with_lower_similarity() -> None:
@@ -494,8 +494,11 @@ def test_multi_retriever_three_routes_integration(tmp_path: Path) -> None:
         confidence="EXTRACTED",
     )
     g.add_edge(
-        "Transformer", "Attention",
-        relation="uses", source_file="doc.md", confidence="EXTRACTED",
+        "Transformer",
+        "Attention",
+        relation="uses",
+        source_file="doc.md",
+        confidence="EXTRACTED",
     )
 
     # vector 路

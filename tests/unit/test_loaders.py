@@ -350,7 +350,12 @@ def test_registry_load_py_unsupported_without_code_loader(tmp_path: Path) -> Non
 
 def test_package_exports_public_api() -> None:
     """__init__ 导出四个公共符号，便于上层 from nanokb.loaders import ...。"""
-    for name in ("DocumentLoader", "LoaderRegistry", "UnstructuredLoader", "UnsupportedFormatError"):
+    for name in (
+        "DocumentLoader",
+        "LoaderRegistry",
+        "UnstructuredLoader",
+        "UnsupportedFormatError",
+    ):
         assert hasattr(loaders_pkg, name)
 
 

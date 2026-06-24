@@ -231,7 +231,9 @@ def compile(  # noqa: A001  — 故意与内建同名，方案 §3.5.1 指定
     to_process_preview = sorted(set(changes.added) | set(changes.modified))
     logger.info(
         "changes detected: %d added, %d modified, %d deleted — %d file(s) to extract",
-        len(changes.added), len(changes.modified), len(changes.deleted),
+        len(changes.added),
+        len(changes.modified),
+        len(changes.deleted),
         len(to_process_preview),
         extra={"stage": "compile-detect"},
     )
@@ -272,21 +274,27 @@ def compile(  # noqa: A001  — 故意与内建同名，方案 §3.5.1 指定
     for idx, path in enumerate(to_process, 1):
         abs_path = raw_dir / path
         logger.info(
-            "[%d/%d] ingesting %s ...", idx, total, path,
+            "[%d/%d] ingesting %s ...",
+            idx,
+            total,
+            path,
             extra={"stage": "compile-ingest", "file": path},
         )
         try:
             doc = ingest_file(abs_path, raw_dir, registry, settings)
         except UnsupportedFormatError as exc:
             logger.warning(
-                "skip unsupported file: %s (%s)", path, exc,
+                "skip unsupported file: %s (%s)",
+                path,
+                exc,
                 extra={"stage": "compile-ingest", "file": path},
             )
             skipped.append(path)
             continue
         except Exception:
             logger.exception(
-                "ingest failed for %s", path,
+                "ingest failed for %s",
+                path,
                 extra={"stage": "compile-ingest", "file": path},
             )
             skipped.append(path)
@@ -298,7 +306,11 @@ def compile(  # noqa: A001  — 故意与内建同名，方案 §3.5.1 指定
             cached_count += 1
             logger.info(
                 "[%d/%d] cache hit %s → %d triples, %d concepts",
-                idx, total, path, len(result.triples), len(result.concepts),
+                idx,
+                total,
+                path,
+                len(result.triples),
+                len(result.concepts),
                 extra={"stage": "compile-extract", "file": path},
             )
         else:
@@ -306,7 +318,8 @@ def compile(  # noqa: A001  — 故意与内建同名，方案 §3.5.1 指定
                 result = extractor.extract(doc)
             except Exception:
                 logger.exception(
-                    "extraction failed for %s", path,
+                    "extraction failed for %s",
+                    path,
                     extra={"stage": "compile-extract", "file": path},
                 )
                 skipped.append(path)
@@ -323,7 +336,11 @@ def compile(  # noqa: A001  — 故意与内建同名，方案 §3.5.1 指定
 
             logger.info(
                 "[%d/%d] extracted %s → %d triples, %d concepts",
-                idx, total, path, len(result.triples), len(result.concepts),
+                idx,
+                total,
+                path,
+                len(result.triples),
+                len(result.concepts),
                 extra={"stage": "compile-extract", "file": path},
             )
 
@@ -337,12 +354,15 @@ def compile(  # noqa: A001  — 故意与内建同名，方案 §3.5.1 指定
         graph_builder.delete_by_source(path)
         if vector_store is not None:
             vector_store.delete_by_source(path)
-        _append_triples_log(out_dir, {
-            "schema_version": manifest.version,
-            "op": "delete",
-            "source_file": path,
-            "ts": _now_iso(),
-        })
+        _append_triples_log(
+            out_dir,
+            {
+                "schema_version": manifest.version,
+                "op": "delete",
+                "source_file": path,
+                "ts": _now_iso(),
+            },
+        )
         manifest.files.pop(path, None)
 
     # step 4: modified 先清后建（Medium #2）——在 upsert 之前清旧边/旧向量
@@ -355,21 +375,25 @@ def compile(  # noqa: A001  — 故意与内建同名，方案 §3.5.1 指定
 
     # step 5: added/modified 图构建（无向量，v4 拆分独立小阶段）
     logger.info(
-        "building graph from %d file(s)...", len(results_map),
+        "building graph from %d file(s)...",
+        len(results_map),
         extra={"stage": "compile-graph"},
     )
     for path in to_process:
         if path not in results_map:
             continue
         result = results_map[path]
-        _append_triples_log(out_dir, {
-            "schema_version": manifest.version,
-            "op": "upsert",
-            "source_file": path,
-            "triples": [t.model_dump(mode="json") for t in result.triples],
-            "concepts": [c.model_dump(mode="json") for c in result.concepts],
-            "ts": _now_iso(),
-        })
+        _append_triples_log(
+            out_dir,
+            {
+                "schema_version": manifest.version,
+                "op": "upsert",
+                "source_file": path,
+                "triples": [t.model_dump(mode="json") for t in result.triples],
+                "concepts": [c.model_dump(mode="json") for c in result.concepts],
+                "ts": _now_iso(),
+            },
+        )
         graph_builder.upsert(result, path)
 
     # step 6: synthesize_fallback_descriptions（Opt #2 v3 + v4 Medium #1）
@@ -380,7 +404,8 @@ def compile(  # noqa: A001  — 故意与内建同名，方案 §3.5.1 指定
     # step 7: 向量索引（v4 新增独立步骤）——逐 path 子图，描述已就绪
     if vector_store is not None:
         logger.info(
-            "indexing vectors (embedding model: %s)...", settings.embedding_model,
+            "indexing vectors (embedding model: %s)...",
+            settings.embedding_model,
             extra={"stage": "compile-vector"},
         )
         for path in to_process:
@@ -418,14 +443,22 @@ def compile(  # noqa: A001  — 故意与内建同名，方案 §3.5.1 指定
     # 断言的集成测试引入额外 complete 调用。社区 LLM 摘要可经 detect_communities
     # 直接调用时启用（llm 非 None），或后续 feature 增设开关接入。
     _finalize_staging(
-        graph_builder, manifest, out_dir,
-        graph=graph, settings=settings, llm=None,
+        graph_builder,
+        manifest,
+        out_dir,
+        graph=graph,
+        settings=settings,
+        llm=None,
     )
 
     logger.info(
         "compile done: added=%d modified=%d deleted=%d extracted=%d skipped=%d fallback=%d",
-        len(changes.added), len(changes.modified), len(changes.deleted),
-        len(results_map), len(skipped), fallback_count,
+        len(changes.added),
+        len(changes.modified),
+        len(changes.deleted),
+        len(results_map),
+        len(skipped),
+        fallback_count,
         extra={"stage": "compile"},
     )
 
@@ -520,13 +553,19 @@ def replay(settings: Settings) -> ReplayResult:
 
     # step 10-11: 序列化 + 原子切换
     _finalize_staging(
-        graph_builder, manifest, out_dir,
-        graph=graph, settings=settings, llm=None,
+        graph_builder,
+        manifest,
+        out_dir,
+        graph=graph,
+        settings=settings,
+        llm=None,
     )
 
     logger.info(
         "replay done: rebuilt=%d deleted=%d fallback=%d",
-        len(rebuilt_files), len(deleted_files), fallback_count,
+        len(rebuilt_files),
+        len(deleted_files),
+        fallback_count,
         extra={"stage": "replay"},
     )
 
@@ -661,9 +700,7 @@ def search_communities(
         if communities is None:
             communities = load_communities(settings.out_dir)
         if communities is None or not communities.communities:
-            raise ColdStartError(
-                "社区索引未编译，请先运行 nanokb build 完成高级索引"
-            )
+            raise ColdStartError("社区索引未编译，请先运行 nanokb build 完成高级索引")
 
         if graph is None:
             graph = _load_graph(settings.out_dir)
@@ -821,14 +858,8 @@ def _normalize_result_source(result: ExtractionResult, source_file: str) -> Extr
     而流水线的 manifest key / 删除逻辑使用相对 raw_dir 的路径。本函数确保二者一致，
     使 ``graph_builder.delete_by_source(rel_key)`` 能正确匹配边/节点。
     """
-    new_triples = [
-        t.model_copy(update={"source_file": source_file})
-        for t in result.triples
-    ]
-    new_concepts = [
-        c.model_copy(update={"source_file": source_file})
-        for c in result.concepts
-    ]
+    new_triples = [t.model_copy(update={"source_file": source_file}) for t in result.triples]
+    new_concepts = [c.model_copy(update={"source_file": source_file}) for c in result.concepts]
     return ExtractionResult(triples=new_triples, concepts=new_concepts)
 
 
@@ -910,9 +941,7 @@ def _dedup_converge(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return converged
 
 
-def _validate_and_migrate_schema(
-    records: list[dict[str, Any]], target_version: str
-) -> None:
+def _validate_and_migrate_schema(records: list[dict[str, Any]], target_version: str) -> None:
     """校验 triples.jsonl 记录的 schema_version 与 manifest 兼容。
 
     - jsonl < manifest（升级）：按迁移函数链逐级迁移（当前无注册迁移函数）。
@@ -924,13 +953,15 @@ def _validate_and_migrate_schema(
         if rec_version > target:
             logger.error(
                 "replay: record schema_version %d > manifest %d; cannot downgrade",
-                rec_version, target,
+                rec_version,
+                target,
             )
             raise SystemExit(3)
         if rec_version < target:
             logger.error(
                 "replay: no migration from schema_version %d to %d",
-                rec_version, target,
+                rec_version,
+                target,
             )
             raise SystemExit(3)
 

@@ -187,9 +187,7 @@ def test_list_pending_skips_non_pending_lines(tmp_path: Path) -> None:
     """已勾选（``- [x]``）与无前缀行被跳过。"""
     path = tmp_path / REVIEW_QUEUE_FILENAME
     path.write_text(
-        "- [ ] keep | low_hit_count | A | ts1\n"
-        "- [x] done | low_hit_count | B | ts2\n"
-        "random junk\n",
+        "- [ ] keep | low_hit_count | A | ts1\n- [x] done | low_hit_count | B | ts2\nrandom junk\n",
         encoding="utf-8",
     )
     entries = ReviewQueue(tmp_path).list_pending()

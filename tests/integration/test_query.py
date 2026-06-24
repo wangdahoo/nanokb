@@ -52,27 +52,33 @@ class FakeLLMClient:
 
 def _extract_response() -> str:
     """FakeLLM 抽取响应：Transformer→Attention (EXTRACTED) + Transformer→Model (INFERRED)。"""
-    return json.dumps({
-        "triples": [
-            {
-                "head": "Transformer",
-                "relation": "uses",
-                "tail": "Attention",
-                "confidence": "EXTRACTED",
-            },
-            {
-                "head": "Transformer",
-                "relation": "is_a",
-                "tail": "Model",
-                "confidence": "INFERRED",
-            },
-        ],
-        "concepts": [
-            {"name": "Transformer", "description": "A sequence model.", "node_type": "model"},
-            {"name": "Attention", "description": "A focus mechanism.", "node_type": "mechanism"},
-            {"name": "Model", "description": "A model category.", "node_type": "category"},
-        ],
-    })
+    return json.dumps(
+        {
+            "triples": [
+                {
+                    "head": "Transformer",
+                    "relation": "uses",
+                    "tail": "Attention",
+                    "confidence": "EXTRACTED",
+                },
+                {
+                    "head": "Transformer",
+                    "relation": "is_a",
+                    "tail": "Model",
+                    "confidence": "INFERRED",
+                },
+            ],
+            "concepts": [
+                {"name": "Transformer", "description": "A sequence model.", "node_type": "model"},
+                {
+                    "name": "Attention",
+                    "description": "A focus mechanism.",
+                    "node_type": "mechanism",
+                },
+                {"name": "Model", "description": "A model category.", "node_type": "category"},
+            ],
+        }
+    )
 
 
 def _build_compiled_kb(tmp_path: Path) -> Settings:
@@ -110,9 +116,7 @@ def test_answer_query_returns_cited_answer(tmp_path: Path) -> None:
     gen = "Transformer 通过 self-attention 机制依赖 Attention^[doc.md]。"
     llm = FakeLLMClient(responses=[ner, gen])
 
-    result = pipeline.answer_query(
-        settings, "Transformer 如何依赖 Attention？", llm=llm
-    )
+    result = pipeline.answer_query(settings, "Transformer 如何依赖 Attention？", llm=llm)
 
     assert isinstance(result.answer, Answer)
     assert "^[doc.md]" in result.answer.text
@@ -136,8 +140,7 @@ def test_answer_query_marks_used_inferred_when_context_has_inferred(tmp_path: Pa
 
     # hits 含 INFERRED (Transformer is_a Model)
     assert any(
-        h.triple is not None and h.triple.confidence == Confidence.INFERRED
-        for h in result.hits
+        h.triple is not None and h.triple.confidence == Confidence.INFERRED for h in result.hits
     )
     assert result.answer.used_inferred is True
     assert "此结论为 AI 推理，建议核实源文件" in result.answer.text
@@ -157,9 +160,7 @@ def test_answer_query_lowercase_entity_still_hits(tmp_path: Path) -> None:
 
     # 即便 NER 返回小写，normalize 后仍命中 Transformer 节点
     assert len(result.hits) >= 1
-    assert any(
-        h.triple is not None and h.triple.head == "Transformer" for h in result.hits
-    )
+    assert any(h.triple is not None and h.triple.head == "Transformer" for h in result.hits)
 
 
 # ── AC #4：不相关实体 → 未找到相关知识点 ──────────────────────────────

@@ -42,8 +42,8 @@ class FakeLLMClient:
         default: str | None = None,
     ) -> None:
         self._responses = list(responses) if responses else []
-        self._default = default if default is not None else json.dumps(
-            {"triples": [], "concepts": []}
+        self._default = (
+            default if default is not None else json.dumps({"triples": [], "concepts": []})
         )
         self.calls: list[dict[str, Any]] = []
 
@@ -282,9 +282,7 @@ def test_malformed_json_then_success_on_retry_does_not_degrade() -> None:
     broken = "not json at all"
     good = json.dumps(
         {
-            "triples": [
-                {"head": "A", "relation": "r", "tail": "B", "confidence": "EXTRACTED"}
-            ],
+            "triples": [{"head": "A", "relation": "r", "tail": "B", "confidence": "EXTRACTED"}],
             "concepts": [{"name": "A", "description": "entity A", "node_type": "x"}],
         }
     )
@@ -304,9 +302,7 @@ def test_malformed_json_in_one_chunk_does_not_break_other_chunks() -> None:
     broken = "broken {{"
     good = json.dumps(
         {
-            "triples": [
-                {"head": "X", "relation": "rel", "tail": "Y", "confidence": "EXTRACTED"}
-            ],
+            "triples": [{"head": "X", "relation": "rel", "tail": "Y", "confidence": "EXTRACTED"}],
             "concepts": [{"name": "X", "description": "ok", "node_type": "concept"}],
         }
     )
@@ -409,9 +405,7 @@ def test_malformed_triple_entries_are_skipped_not_raising() -> None:
 def test_unknown_confidence_falls_back_to_extracted() -> None:
     llm_response = json.dumps(
         {
-            "triples": [
-                {"head": "A", "relation": "r", "tail": "B", "confidence": "WHATEVER"}
-            ],
+            "triples": [{"head": "A", "relation": "r", "tail": "B", "confidence": "WHATEVER"}],
             "concepts": [],
         }
     )

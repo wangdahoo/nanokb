@@ -83,15 +83,17 @@ def test_modified_removes_entity_no_residual(tmp_path: Path) -> None:
     settings = _settings(raw_dir, out_dir)
 
     # v1 抽取结果：含 Foo, Bar 两个实体
-    v1_response = json.dumps({
-        "triples": [
-            {"head": "Foo", "relation": "rel", "tail": "Bar", "confidence": "EXTRACTED"},
-        ],
-        "concepts": [
-            {"name": "Foo", "description": "Entity Foo.", "node_type": "concept"},
-            {"name": "Bar", "description": "Entity Bar.", "node_type": "concept"},
-        ],
-    })
+    v1_response = json.dumps(
+        {
+            "triples": [
+                {"head": "Foo", "relation": "rel", "tail": "Bar", "confidence": "EXTRACTED"},
+            ],
+            "concepts": [
+                {"name": "Foo", "description": "Entity Foo.", "node_type": "concept"},
+                {"name": "Bar", "description": "Entity Bar.", "node_type": "concept"},
+            ],
+        }
+    )
 
     llm = FakeLLMClient([v1_response])
     pipeline.compile(settings, llm=llm)
@@ -103,15 +105,17 @@ def test_modified_removes_entity_no_residual(tmp_path: Path) -> None:
 
     # 修改文件（sha256 变更）→ v2 抽取结果不含 Foo
     doc_path.write_text("Version 2 without Foo, only Baz.", encoding="utf-8")
-    v2_response = json.dumps({
-        "triples": [
-            {"head": "Baz", "relation": "rel", "tail": "Bar", "confidence": "EXTRACTED"},
-        ],
-        "concepts": [
-            {"name": "Baz", "description": "Entity Baz.", "node_type": "concept"},
-            {"name": "Bar", "description": "Entity Bar v2.", "node_type": "concept"},
-        ],
-    })
+    v2_response = json.dumps(
+        {
+            "triples": [
+                {"head": "Baz", "relation": "rel", "tail": "Bar", "confidence": "EXTRACTED"},
+            ],
+            "concepts": [
+                {"name": "Baz", "description": "Entity Baz.", "node_type": "concept"},
+                {"name": "Bar", "description": "Entity Bar v2.", "node_type": "concept"},
+            ],
+        }
+    )
 
     llm2 = FakeLLMClient([v2_response])
     pipeline.compile(settings, llm=llm2)
@@ -136,13 +140,15 @@ def test_modified_clean_before_rebuild_vector_order(tmp_path: Path) -> None:
 
     settings = _settings(raw_dir, out_dir)
 
-    v1 = json.dumps({
-        "triples": [{"head": "Foo", "relation": "r", "tail": "Bar", "confidence": "EXTRACTED"}],
-        "concepts": [
-            {"name": "Foo", "description": "Foo desc.", "node_type": "concept"},
-            {"name": "Bar", "description": "Bar desc.", "node_type": "concept"},
-        ],
-    })
+    v1 = json.dumps(
+        {
+            "triples": [{"head": "Foo", "relation": "r", "tail": "Bar", "confidence": "EXTRACTED"}],
+            "concepts": [
+                {"name": "Foo", "description": "Foo desc.", "node_type": "concept"},
+                {"name": "Bar", "description": "Bar desc.", "node_type": "concept"},
+            ],
+        }
+    )
 
     llm = FakeLLMClient([v1])
     vs = OrderedFakeVectorStore()
@@ -150,25 +156,23 @@ def test_modified_clean_before_rebuild_vector_order(tmp_path: Path) -> None:
 
     # 修改文件触发 modified
     doc_path.write_text("v2 changed content", encoding="utf-8")
-    v2 = json.dumps({
-        "triples": [{"head": "Baz", "relation": "r", "tail": "Bar", "confidence": "EXTRACTED"}],
-        "concepts": [
-            {"name": "Baz", "description": "Baz desc.", "node_type": "concept"},
-            {"name": "Bar", "description": "Bar desc.", "node_type": "concept"},
-        ],
-    })
+    v2 = json.dumps(
+        {
+            "triples": [{"head": "Baz", "relation": "r", "tail": "Bar", "confidence": "EXTRACTED"}],
+            "concepts": [
+                {"name": "Baz", "description": "Baz desc.", "node_type": "concept"},
+                {"name": "Bar", "description": "Bar desc.", "node_type": "concept"},
+            ],
+        }
+    )
 
     vs2 = OrderedFakeVectorStore()
     llm2 = FakeLLMClient([v2])
     pipeline.compile(settings, llm=llm2, vector_store=vs2)
 
     # 先清后建：delete(doc.md) 出现在 index 之前
-    delete_indices = [
-        i for i, (op, _) in enumerate(vs2.operations) if op == "delete"
-    ]
-    index_indices = [
-        i for i, (op, _) in enumerate(vs2.operations) if op == "index"
-    ]
+    delete_indices = [i for i, (op, _) in enumerate(vs2.operations) if op == "delete"]
+    index_indices = [i for i, (op, _) in enumerate(vs2.operations) if op == "index"]
     assert delete_indices, "expected at least one delete_by_source call"
     assert index_indices, "expected at least one index_nodes call"
     assert max(delete_indices) < min(index_indices), (
@@ -193,15 +197,26 @@ def test_missed_concept_gets_fallback_and_vector(tmp_path: Path) -> None:
     settings = _settings(raw_dir, out_dir)
 
     # LLM 返回：Transformer 有 concept，但 Bar 没有（漏抽）
-    response = json.dumps({
-        "triples": [
-            {"head": "Transformer", "relation": "uses", "tail": "Bar", "confidence": "EXTRACTED"},
-        ],
-        "concepts": [
-            {"name": "Transformer", "description": "A model architecture.", "node_type": "concept"},
-            # Bar 被漏抽——无 concept 条目
-        ],
-    })
+    response = json.dumps(
+        {
+            "triples": [
+                {
+                    "head": "Transformer",
+                    "relation": "uses",
+                    "tail": "Bar",
+                    "confidence": "EXTRACTED",
+                },
+            ],
+            "concepts": [
+                {
+                    "name": "Transformer",
+                    "description": "A model architecture.",
+                    "node_type": "concept",
+                },
+                # Bar 被漏抽——无 concept 条目
+            ],
+        }
+    )
 
     llm = FakeLLMClient([response])
     vs = OrderedFakeVectorStore()
@@ -232,12 +247,14 @@ def test_missed_concept_no_vector_store_still_synthesizes(tmp_path: Path) -> Non
     settings = _settings(raw_dir, out_dir)
 
     # 无 concept，仅 triples
-    response = json.dumps({
-        "triples": [
-            {"head": "A", "relation": "rel", "tail": "B", "confidence": "EXTRACTED"},
-        ],
-        "concepts": [],
-    })
+    response = json.dumps(
+        {
+            "triples": [
+                {"head": "A", "relation": "rel", "tail": "B", "confidence": "EXTRACTED"},
+            ],
+            "concepts": [],
+        }
+    )
 
     llm = FakeLLMClient([response])
     result = pipeline.compile(settings, llm=llm)

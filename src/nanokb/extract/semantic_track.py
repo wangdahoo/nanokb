@@ -61,13 +61,7 @@ _SENTENCE_SPLIT_RE = re.compile(r"(?<=[。.!！?？;；\n])\s*")
 
 def _build_user_prompt(chunk: Chunk) -> str:
     """构造单块抽取的 user prompt（携带来源文件与块索引供 LLM 引用）。"""
-    return (
-        f"source_file: {chunk.source_file}\n"
-        f"chunk_index: {chunk.index}\n"
-        "\n"
-        "text:\n"
-        f"{chunk.text}"
-    )
+    return f"source_file: {chunk.source_file}\nchunk_index: {chunk.index}\n\ntext:\n{chunk.text}"
 
 
 def _split_sentences(text: str) -> list[str]:
@@ -121,14 +115,16 @@ class SemanticTrack:
         total_chunks = len(ordered_chunks)
         for ci, chunk in enumerate(ordered_chunks, 1):
             logger.info(
-                "  chunk %d/%d of %s ...", ci, total_chunks, doc.path.name,
+                "  chunk %d/%d of %s ...",
+                ci,
+                total_chunks,
+                doc.path.name,
             )
             parsed = self._extract_chunk_with_retry(chunk)
             if parsed is None:
                 # Medium #4：解析仍失败 → AMBIGUOUS 哨兵，不崩溃
                 logger.warning(
-                    "chunk %d of %s: extraction failed after retry, "
-                    "emitting AMBIGUOUS sentinel",
+                    "chunk %d of %s: extraction failed after retry, emitting AMBIGUOUS sentinel",
                     chunk.index,
                     source_file,
                 )
@@ -153,9 +149,7 @@ class SemanticTrack:
             for raw_concept in parsed.get("concepts", []):
                 self._merge_concept(raw_concept, chunk.index, source_file, merged_concepts)
 
-        return ExtractionResult(
-            triples=triples, concepts=list(merged_concepts.values())
-        )
+        return ExtractionResult(triples=triples, concepts=list(merged_concepts.values()))
 
     def _extract_chunk_with_retry(self, chunk: Chunk) -> dict[str, Any] | None:
         """调用 LLM 并解析；首次失败重试 1 次（temperature 升至 0.2）。
@@ -176,8 +170,7 @@ class SemanticTrack:
             return parsed
 
         logger.warning(
-            "chunk %d: JSON parse failed on first attempt, retrying "
-            "with temperature=0.2",
+            "chunk %d: JSON parse failed on first attempt, retrying with temperature=0.2",
             chunk.index,
         )
         raw = self._llm.complete(
@@ -206,9 +199,7 @@ class SemanticTrack:
         return {"triples": triples, "concepts": concepts}
 
     @staticmethod
-    def _coerce_triple(
-        raw: Any, source_file: str, chunk_index: int
-    ) -> Triple | None:
+    def _coerce_triple(raw: Any, source_file: str, chunk_index: int) -> Triple | None:
         """把 LLM 返回的单条三元组 dict 转为 ``Triple``；关键字段缺失返回 None。"""
         if not isinstance(raw, dict):
             return None

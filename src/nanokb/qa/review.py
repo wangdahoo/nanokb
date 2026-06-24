@@ -148,7 +148,7 @@ class ReviewQueue:
             line = raw.strip()
             if not line.startswith(_PENDING_PREFIX):
                 continue
-            body = line[len(_PENDING_PREFIX):].lstrip()
+            body = line[len(_PENDING_PREFIX) :].lstrip()
             parsed = _split_fields(body)
             if parsed is None:
                 continue

@@ -46,19 +46,21 @@ class FakeLLMClient:
         # 根据当前处理的文档内容返回包含该文档实体的抽取结果。
         # system/user 中不直接传文件名；改为返回一个稳定 JSON，让所有文件都成功抽取。
         # 关键是每次调用都返回合法 JSON，保证流水线不崩溃。
-        return json.dumps({
-            "triples": [
-                {
-                    "head": "Shared",
-                    "relation": "mentions",
-                    "tail": _extract_tail_from_user(user),
-                    "confidence": "EXTRACTED",
-                }
-            ],
-            "concepts": [
-                {"name": "Shared", "description": "Shared entity.", "node_type": "concept"},
-            ],
-        })
+        return json.dumps(
+            {
+                "triples": [
+                    {
+                        "head": "Shared",
+                        "relation": "mentions",
+                        "tail": _extract_tail_from_user(user),
+                        "confidence": "EXTRACTED",
+                    }
+                ],
+                "concepts": [
+                    {"name": "Shared", "description": "Shared entity.", "node_type": "concept"},
+                ],
+            }
+        )
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         return [[0.0] * 8 for _ in texts]
@@ -168,8 +170,10 @@ def test_watch_concurrent_writes_serial_processing_no_corruption(tmp_path: Path)
         files = [f"doc{i:02d}.md" for i in range(5)]
         threads = []
         for name in files:
+
             def _write(n: str = name) -> None:
                 (raw_dir / n).write_text(f"Content of {n}", encoding="utf-8")
+
             t = threading.Thread(target=_write)
             threads.append(t)
         for t in threads:
@@ -199,9 +203,7 @@ def test_watch_concurrent_writes_serial_processing_no_corruption(tmp_path: Path)
     assert manifest_path.exists()
     manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
     recorded_files = set(manifest_data.get("files", {}).keys())
-    assert recorded_files == set(files), (
-        f"expected all 5 files in manifest, got: {recorded_files}"
-    )
+    assert recorded_files == set(files), f"expected all 5 files in manifest, got: {recorded_files}"
 
     # graph 节点数 >= 1（至少 Shared + 若干 tail 实体）
     node_count = _load_graph_node_count(out_dir)
@@ -298,9 +300,7 @@ def test_watch_stop_after_concurrent_writes_cleans_up(tmp_path: Path) -> None:
     for i in range(3):
         (raw_dir / f"f{i}.md").write_text(f"content {i}", encoding="utf-8")
 
-    _wait_for_condition(
-        lambda: (out_dir / "graph.json").exists(), timeout=8.0
-    )
+    _wait_for_condition(lambda: (out_dir / "graph.json").exists(), timeout=8.0)
     time.sleep(0.2)
 
     ctx.stop()
@@ -345,9 +345,7 @@ def test_cli_build_watch_processes_concurrent_writes(tmp_path: Path) -> None:
         for i in range(4):
             (raw_dir / f"watch_doc_{i}.md").write_text(f"Doc {i} content.", encoding="utf-8")
 
-        _wait_for_condition(
-            lambda: (out_dir / "manifest.json").exists(), timeout=8.0
-        )
+        _wait_for_condition(lambda: (out_dir / "manifest.json").exists(), timeout=8.0)
         time.sleep(0.3)
     finally:
         ctx.stop()

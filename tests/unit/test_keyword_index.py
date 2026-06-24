@@ -302,7 +302,10 @@ def test_build_multiple_nodes_same_keyword(tmp_path: Path) -> None:
         "NodeA", description="A neural network model.", source_file="doc1.md", node_type="concept"
     )
     graph.add_node(
-        "NodeB", description="Another neural network design.", source_file="doc2.md", node_type="concept"
+        "NodeB",
+        description="Another neural network design.",
+        source_file="doc2.md",
+        node_type="concept",
     )
 
     result = build(graph)

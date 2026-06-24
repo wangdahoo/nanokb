@@ -16,11 +16,7 @@ from nanokb.llm.anthropic_client import AnthropicClient
 def _tool_use_response(payload: dict[str, Any]) -> Any:
     """构造包含单个 tool_use 块的伪 anthropic Message 响应。"""
     return SimpleNamespace(
-        content=[
-            SimpleNamespace(
-                type="tool_use", name="emit_json", input=payload
-            )
-        ],
+        content=[SimpleNamespace(type="tool_use", name="emit_json", input=payload)],
         stop_reason="tool_use",
     )
 

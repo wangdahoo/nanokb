@@ -179,8 +179,11 @@ def _make_cold_start_safe_settings(tmp_path: Path) -> Settings:
 def _build_injected_graph() -> nx.MultiDiGraph:
     g: nx.MultiDiGraph = nx.MultiDiGraph()
     g.add_edge(
-        "Foo", "Bar",
-        relation="uses", source_file="f.md", confidence="EXTRACTED",
+        "Foo",
+        "Bar",
+        relation="uses",
+        source_file="f.md",
+        confidence="EXTRACTED",
     )
     return g
 
@@ -218,9 +221,7 @@ def test_answer_query_ask_mode_reports_only_vector_stage(tmp_path: Path) -> None
     llm = _FakeLLM()  # ask 无 NER，向量路无 chroma → 无 generate 调用（空上下文短路）
     reporter = RecordingReporter()
 
-    result = pipeline.answer_query(
-        settings, "q", mode="ask", llm=llm, graph=g, progress=reporter
-    )
+    result = pipeline.answer_query(settings, "q", mode="ask", llm=llm, graph=g, progress=reporter)
 
     # ask 模式无 chroma → retrievers 为空 → recall 仅 fuse stage（无路由 stage）
     assert reporter.stages == [
@@ -243,8 +244,6 @@ def test_answer_query_default_progress_is_noop(tmp_path: Path) -> None:
     gen = "Foo^[f.md]"
     llm = _FakeLLM(responses=[ner, gen])
 
-    result = pipeline.answer_query(
-        settings, "q", mode="query", llm=llm, graph=g
-    )
+    result = pipeline.answer_query(settings, "q", mode="query", llm=llm, graph=g)
 
     assert "^[f.md]" in result.answer.text

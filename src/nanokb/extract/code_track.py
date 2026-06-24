@@ -326,24 +326,18 @@ class CodeTrack:
             callee = spec.extract_callee(node)
             if callee:
                 caller = self._caller(scope_stack, file_node)
-                self._emit(
-                    triples, caller, REL_CALLS, callee, source_file
-                )
+                self._emit(triples, caller, REL_CALLS, callee, source_file)
                 self._ensure_callee_concept(callee, source_file, concepts)
 
         for child in node.children:
-            self._walk(
-                child, spec, scope_stack, file_node, source_file, triples, concepts
-            )
+            self._walk(child, spec, scope_stack, file_node, source_file, triples, concepts)
 
         if pushed:
             scope_stack.pop()
 
     # ── 定义节点处理 ──────────────────────────────────────────────────
 
-    def _classify_def(
-        self, node: Node, spec: LangSpec, scope_stack: list[_Scope]
-    ) -> str | None:
+    def _classify_def(self, node: Node, spec: LangSpec, scope_stack: list[_Scope]) -> str | None:
         """判定节点是否为定义，返回 'class' / 'method' / 'function'，否则 None。
 
         Python 的 ``function_definition`` 在类作用域内降级为 method（contextual_methods）。
