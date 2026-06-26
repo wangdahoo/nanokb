@@ -285,6 +285,22 @@ nanokb review               # 检查待审队列 → 补充 raw/ 文档 → rebu
 
 > **智谱 GLM 示例**:用 GLM 做生成时,embedding 需同步换成智谱模型(如 `embedding-3`),不能继续用 OpenAI 的 `text-embedding-3-small`。
 
+### 抽取并发与速率限制
+
+extract 阶段支持可配置的文档级 + chunk 级并发（`ThreadPoolExecutor`），加速大文档库的冷启动与增量重编译。LLM 调用是网络 IO 等待，不受 GIL 限制，线程并发对语义轨抽取显著有效。
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `NANOKB_EXTRACT_CHUNK_CONCURRENCY` | `4` | 单文档内同时抽取的 chunk 数。`0`/`1` = 串行。chunk 级是 LLM IO 等待绝对瓶颈，默认即开 |
+| `NANOKB_EXTRACT_DOC_CONCURRENCY` | `1` | 阶段 A 同时处理的文件数。`0`/`1` = 串行（严格向后兼容） |
+| `NANOKB_LLM_REQUEST_INTERVAL` | `0.0` | 两次 LLM 请求间最小间隔秒数（0=不限速）。线程安全的全局 `RateLimiter` 节流 |
+
+**并发度与限流的关系**：实际对 LLM API 的并发请求数 ≈ `extract_doc_concurrency × extract_chunk_concurrency`。三者由进程级共享的 `RateLimiter`（基于 `llm_request_interval`）统一节流——即使并发度乘积远大于 provider 的 RPM 限额，`RateLimiter` 也会自动串行化请求，保证不突破限流。无需手动计算"并发度 ≤ 60/RPM"，但建议保持合理乘积避免线程空等。
+
+**确定性保证**：并发抽取采用"先并发收集、再按 `chunk_index` 升序回放合并"，输出与串行模式逐字节一致（`last-write-wins` / `concat_dedup` 顺序确定）。两并发度均为 `1` 时行为与改造前完全一致（零回归）。
+
+> **提示**：纯代码库（全 `.py` / `.js` / `.java`）走 CodeTrack（tree-sitter CPU 密集、零 Token），线程并发受 GIL 限制无加速——**不建议**开启 `extract_doc_concurrency`，否则只会创建多个线程抢 GIL 反增开销。
+
 ### Embedding
 
 | 变量 | 默认值 | 说明 |

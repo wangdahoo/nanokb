@@ -192,3 +192,47 @@ def test_embed_respects_throttle(monkeypatch: pytest.MonkeyPatch) -> None:
 
     client.embed(["text2"])  # 第二次：应 sleep 1.5s
     assert 1.5 in sleep_calls
+
+
+# ── 三者叠加：RateLimiter 节流 + 应用层 429 退避（方案 §5.4，Feature s1-feat-005） ──
+
+
+def test_rate_limiter_plus_app_backoff_compose_without_deadlock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC #2：注入 RateLimiter + 应用层 RateLimitError 退避叠加，无死锁/无请求丢失。
+
+    构造 OpenAIClient（rate_limiter=RateLimiter(interval=0.05), rate_limit_retries=2），
+    mock create 前两次抛 429、第三次成功。验证：
+    - 三种机制叠加下最终成功返回（不卡死、不丢请求）；
+    - 每次重试前都经过 RateLimiter.acquire 节流（0.05 间隔）+ 应用层 backoff（10s/20s）。
+    """
+    client = OpenAIClient(
+        api_key="sk-fake",
+        model="gpt-4o-mini",
+        embedding_model="x",
+        rate_limiter=RateLimiter(interval=0.05),
+        rate_limit_retries=2,
+    )
+    create_mock = MagicMock(
+        side_effect=[
+            _make_rate_limit_error(),
+            _make_rate_limit_error(),
+            _make_chat_response('{"ok": true}'),
+        ]
+    )
+    client._client.chat.completions.create = create_mock
+
+    # 捕获所有 sleep（RateLimiter.acquire 的节流 sleep + 应用层 backoff sleep 共用 time.sleep）
+    sleep_calls: list[float] = []
+    monkeypatch.setattr(time, "sleep", lambda s: sleep_calls.append(s))
+
+    result = client.complete("system", "user")
+
+    # 最终成功返回（无死锁、无请求丢失）
+    assert result == '{"ok": true}'
+    assert create_mock.call_count == 3  # 1 次初始 + 2 次重试
+    # 应用层指数退避（10s, 20s）与 RateLimiter 节流（0.05s）均出现，证明三者叠加生效
+    assert 10.0 in sleep_calls, f"missing backoff(10s); sleeps={sleep_calls}"
+    assert 20.0 in sleep_calls, f"missing backoff(20s); sleeps={sleep_calls}"
+    assert 0.05 in sleep_calls, f"missing rate-limiter throttle(0.05s); sleeps={sleep_calls}"
