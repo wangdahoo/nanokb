@@ -85,6 +85,13 @@ class Settings(BaseSettings):
     fallback_description_max_edges: int = 5
     leiden_symmetrize: Literal["sum", "max"] = "sum"
 
+    # ── 抽取并发 ────────────────────────────────────────────────────
+    # chunk 级并发度：单文档内同时抽取的 chunk 数（方案 §3.1，Feature s1-feat-003）。
+    # 0/1 = 串行；默认 4（chunk 级是 LLM IO 等待绝对瓶颈，开箱即用即有收益）。
+    # 实际对 API 的并发请求数 = extract_doc_concurrency × extract_chunk_concurrency，
+    # 由全局 RateLimiter 统一节流。
+    extract_chunk_concurrency: int = 4
+
     # ── 检索/问答 ───────────────────────────────────────────────────
     retrieval_hops: int = 2
     max_context_tokens: int = 4000

@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 import re
 from typing import Any
@@ -101,53 +102,109 @@ class SemanticTrack:
         self._settings = settings
 
     def extract(self, doc: Document) -> ExtractionResult:
-        """对 ``doc.chunks`` 逐块抽取并合并为 ``ExtractionResult``。
+        """对 ``doc.chunks`` 抽取并合并为 ``ExtractionResult``。
+
+        支持可配置 chunk 级并发（方案 §3.3，Feature s1-feat-003）：
+        ``extract_chunk_concurrency<=1`` 时串行；``>1`` 时用 ``ThreadPoolExecutor``
+        并发抽取各 chunk，收集后按 ``chunk_index`` 升序回放合并，**完全保留
+        last-write-wins / concat_dedup 确定性**（线程完成顺序不影响回放顺序）。
+
+        两分支统一把单 chunk LLM 异常降级为 AMBIGUOUS 哨兵（方案 A，相对原
+        "连累整文档失败"的有意变更）：``_extract_chunk_with_retry`` 只降级 JSON
+        解析失败，LLM 调用本身的异常（网络错误 / APIError 等）会被两分支统一
+        try/except 捕获 → ``parsed=None`` → AMBIGUOUS 哨兵。
 
         ``doc.chunks`` 为空时返回空结果（由上游流水线负责分块填充）。
         """
         source_file = str(doc.path)
-        triples: list[Triple] = []
-        merged_concepts: dict[str, Concept] = {}
 
         # 按 chunk_index 升序处理，保证 last-write-wins 语义确定可复现。
         ordered_chunks = sorted(doc.chunks, key=lambda c: c.index)
-
         total_chunks = len(ordered_chunks)
-        for ci, chunk in enumerate(ordered_chunks, 1):
-            logger.info(
-                "  chunk %d/%d of %s ...",
-                ci,
-                total_chunks,
-                doc.path.name,
-            )
-            parsed = self._extract_chunk_with_retry(chunk)
+        concurrency = max(1, self._settings.extract_chunk_concurrency)
+
+        # ── 阶段 1：抽取（线程安全：_extract_chunk_with_retry 无共享可变状态） ──
+        # 收集 (chunk_index, parsed_or_None)；LLM 异常统一降级 None → AMBIGUOUS 哨兵。
+        raw_results: list[tuple[int, dict[str, Any] | None]] = []
+        if concurrency == 1:
+            # 串行回退（零开销，行为与改造前确定性输出一致）
+            for ci, chunk in enumerate(ordered_chunks, 1):
+                logger.info("  chunk %d/%d of %s ...", ci, total_chunks, doc.path.name)
+                try:
+                    parsed = self._extract_chunk_with_retry(chunk)
+                except Exception:
+                    logger.exception(
+                        "chunk %d of %s: extraction crashed, degrading to AMBIGUOUS sentinel",
+                        chunk.index,
+                        source_file,
+                    )
+                    parsed = None
+                raw_results.append((chunk.index, parsed))
+        else:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
+                future_to_chunk = {
+                    pool.submit(self._extract_chunk_with_retry, chunk): chunk
+                    for chunk in ordered_chunks
+                }
+                done = 0
+                for future in concurrent.futures.as_completed(future_to_chunk):
+                    chunk = future_to_chunk[future]
+                    done += 1
+                    logger.info(
+                        "  chunk %d/%d of %s done (%d/%d completed)",
+                        chunk.index,
+                        total_chunks,
+                        doc.path.name,
+                        done,
+                        total_chunks,
+                    )
+                    # 单 chunk 异常隔离：与串行分支一致，降级 None → AMBIGUOUS 哨兵
+                    try:
+                        parsed = future.result()
+                    except Exception:
+                        logger.exception(
+                            "chunk %d of %s: concurrent extraction crashed, "
+                            "degrading to AMBIGUOUS sentinel",
+                            chunk.index,
+                            source_file,
+                        )
+                        parsed = None
+                    raw_results.append((chunk.index, parsed))
+
+        # ── 阶段 2：按 chunk_index 升序回放合并（确定性，主线程串行） ──
+        # as_completed 的乱序到达只影响收集顺序；sort 强制升序回放，
+        # 保证 _merge_concept 的 last-write-wins / concat_dedup 按序生效。
+        raw_results.sort(key=lambda r: r[0])
+        triples: list[Triple] = []
+        merged_concepts: dict[str, Concept] = {}
+        for chunk_index, parsed in raw_results:
             if parsed is None:
-                # Medium #4：解析仍失败 → AMBIGUOUS 哨兵，不崩溃
+                # Medium #4：解析失败或 LLM 异常 → AMBIGUOUS 哨兵，不崩溃
                 logger.warning(
-                    "chunk %d of %s: extraction failed after retry, emitting AMBIGUOUS sentinel",
-                    chunk.index,
+                    "chunk %d of %s: extraction failed, emitting AMBIGUOUS sentinel",
+                    chunk_index,
                     source_file,
                 )
                 triples.append(
                     Triple(
                         head=doc.path.stem or source_file,
                         relation="extraction_failed",
-                        tail=f"chunk_{chunk.index}",
+                        tail=f"chunk_{chunk_index}",
                         confidence=Confidence.AMBIGUOUS,
                         source_file=source_file,
                         track=Track.SEMANTIC,
-                        chunk_index=chunk.index,
+                        chunk_index=chunk_index,
                     )
                 )
                 continue
 
             for raw_triple in parsed.get("triples", []):
-                triple = self._coerce_triple(raw_triple, source_file, chunk.index)
+                triple = self._coerce_triple(raw_triple, source_file, chunk_index)
                 if triple is not None:
                     triples.append(triple)
 
             for raw_concept in parsed.get("concepts", []):
-                self._merge_concept(raw_concept, chunk.index, source_file, merged_concepts)
+                self._merge_concept(raw_concept, chunk_index, source_file, merged_concepts)
 
         return ExtractionResult(triples=triples, concepts=list(merged_concepts.values()))
 
