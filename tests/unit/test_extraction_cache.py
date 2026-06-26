@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 from pathlib import Path
 
 from nanokb.extract.cache import ExtractionCache
@@ -243,3 +244,93 @@ def test_corrupt_file_does_not_block_subsequent_put(tmp_path: Path) -> None:
     got = cache.get(_SHA, _EXTRACTION_SIG, _LLM_MODEL)
     assert got is not None
     assert got.model_dump(mode="json") == original.model_dump(mode="json")
+
+
+# --------------------------------------------------------------------------- #
+# 并发安全（方案 §5.3，Feature s1-feat-004）
+# --------------------------------------------------------------------------- #
+
+
+def test_concurrent_put_different_keys_no_corruption(tmp_path: Path) -> None:
+    """多线程并发 put 不同 key → 各自独立落盘，无文件损坏，全部可命中。
+
+    ExtractionCache 经 atomic_write_text（tempfile.mkstemp 唯一名 + os.replace）
+    写不同 key 的不同文件，并发安全。文档级并发（doc_concurrency>1）下 cache.put
+    会被多 worker 并发调用。
+    """
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    cache = ExtractionCache(cache_dir)
+    n = 12
+
+    shas = [f"{i:064d}" for i in range(n)]
+    results = [_result(head=f"H{i}", tail=f"T{i}", concept=f"C{i}") for i in range(n)]
+    errors: list[BaseException] = []
+    err_lock = threading.Lock()
+
+    def worker(idx: int) -> None:
+        try:
+            cache.put(shas[idx], _EXTRACTION_SIG, _LLM_MODEL, results[idx])
+        except BaseException as exc:  # noqa: BLE001
+            with err_lock:
+                errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, f"concurrent put raised: {errors}"
+    # 每个 key 都能命中且内容正确（无损坏）
+    for i in range(n):
+        got = cache.get(shas[i], _EXTRACTION_SIG, _LLM_MODEL)
+        assert got is not None, f"key {i} missing after concurrent put"
+        assert got.model_dump(mode="json") == results[i].model_dump(mode="json")
+
+
+def test_concurrent_put_same_key_eventually_consistent(tmp_path: Path) -> None:
+    """多线程并发 put 同 key（内容寻址：同 key 即同内容）→ 最终一致、无损坏。
+
+    内容寻址缓存中同 key 意味着同 (sha|sig|model)，对应同一份内容；atomic_write_text
+    的 ``os.replace`` 原子替换保证目标文件永不损坏（要么旧值要么完整新值）。
+
+    平台注记：Windows 上对**同一目标**的并发 ``os.replace`` 可能瞬时抛
+    ``PermissionError``（文件锁，另一线程持有句柄）——这是 OS 已知行为，非缓存
+    缺陷；pipeline 层已 try/except 捕获（"result kept in memory"）。故本测试只断言
+    「无非 PermissionError 致命错误 + 最终可读到一致内容」，不要求每次 put 都成功。
+    先做一次 warm-up put 保证目标存在且内容为 shared，随后并发覆写同 key。
+    """
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    cache = ExtractionCache(cache_dir)
+    shared = _result(head="Shared", tail="Value", concept="K")
+
+    # warm-up：保证目标文件存在且内容为 shared（即使并发覆写全失败，最终值仍一致）
+    cache.put(_SHA, _EXTRACTION_SIG, _LLM_MODEL, shared)
+
+    n = 8
+    errors: list[BaseException] = []
+    err_lock = threading.Lock()
+
+    def worker() -> None:
+        try:
+            cache.put(_SHA, _EXTRACTION_SIG, _LLM_MODEL, shared)
+        except BaseException as exc:  # noqa: BLE001
+            with err_lock:
+                errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    # 仅容忍 Windows 同目标 os.replace 的瞬时 PermissionError；其它异常视为缺陷
+    fatal = [e for e in errors if not isinstance(e, PermissionError)]
+    assert not fatal, f"non-permission error during concurrent same-key put: {fatal}"
+
+    # 最终一致：cache 未损坏，可读到 shared 内容（warm-up 或某次覆写成功）
+    got = cache.get(_SHA, _EXTRACTION_SIG, _LLM_MODEL)
+    assert got is not None
+    assert got.model_dump(mode="json") == shared.model_dump(mode="json")

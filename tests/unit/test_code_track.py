@@ -13,6 +13,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -420,6 +422,58 @@ def test_default_extractor_routes_code_to_code_track() -> None:
 def test_default_extractor_satisfies_protocol() -> None:
     llm = _CountingLLMClient()
     assert isinstance(build_default_extractor(llm, Settings()), Extractor)
+
+
+def test_default_extractor_dcl_constructs_semantic_track_once_under_concurrency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC #4：文档级并发首调多个语义轨文件时，DCL 保证 SemanticTrack 仅构造一次。
+
+    用构造期 sleep 拉宽竞态窗口：无 DCL 时并发线程各自进入构造（多次实例化）；
+    有 DCL（双重检查锁）时仅首个持锁线程构造，其余线程锁后复测 ``_semantic_track``
+    已设置而跳过。``extract_chunk_concurrency=1`` 关闭 chunk 并发，聚焦文档级 DCL。
+    """
+    import nanokb.extract as extract_pkg
+    from nanokb.extract.semantic_track import SemanticTrack
+    from nanokb.llm.base import LLMClient
+
+    instances: list[SemanticTrack] = []
+    inst_lock = threading.Lock()
+
+    class _CountingSemanticTrack(SemanticTrack):
+        def __init__(self, llm: LLMClient, settings: Settings) -> None:
+            time.sleep(0.03)  # 拉宽竞态窗口，让并发首调重叠
+            super().__init__(llm, settings)
+            with inst_lock:
+                instances.append(self)
+
+    monkeypatch.setattr(extract_pkg, "SemanticTrack", _CountingSemanticTrack)
+
+    extractor = build_default_extractor(_CountingLLMClient(), Settings(extract_chunk_concurrency=1))
+    n = 8
+    barrier = threading.Barrier(n)
+
+    def worker() -> None:
+        barrier.wait()
+        extractor.extract(
+            Document(
+                path=Path(f"doc-{threading.get_ident()}.md"),
+                content="text",
+                sha256="x",
+                format="md",
+                chunks=[Chunk(index=0, text="text", token_count=1, source_file="d.md")],
+            )
+        )
+
+    threads = [threading.Thread(target=worker) for _ in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(instances) == 1, (
+        f"DCL failed: SemanticTrack constructed {len(instances)} times under concurrency"
+    )
 
 
 def test_code_track_respects_code_languages_filter() -> None:

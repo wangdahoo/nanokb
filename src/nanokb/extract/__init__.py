@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+import threading
+
 from nanokb.config import Settings
 from nanokb.extract.base import Extractor
 from nanokb.extract.chunker import chunk_text
@@ -39,6 +41,11 @@ class DefaultExtractor:
     extractor 使用——pipeline 不再按文件挑 extractor，由本类内部按扩展名分发。
 
     ``CodeTrack`` 构造不依赖 ``llm``；``SemanticTrack`` 按需懒构造（仅当遇到语义轨文件时）。
+
+    线程安全（方案 §3.5，Feature s1-feat-004）：文档级并发下首个语义轨文件并发
+    到达时，双重检查锁（DCL）保证 ``SemanticTrack`` 仅构造一次。``SemanticTrack``
+    本身是无状态对象（``extract`` 内 triples/merged_concepts 都是方法局部变量），
+    单个共享实例跨文档并发调用 ``extract`` 安全。
     """
 
     def __init__(self, llm: LLMClient, settings: Settings) -> None:
@@ -46,13 +53,17 @@ class DefaultExtractor:
         self._settings = settings
         self._code_track = CodeTrack(settings)
         self._semantic_track: SemanticTrack | None = None
+        self._sem_lock = threading.Lock()  # 保护懒构造（DCL）
 
     def extract(self, doc: Document) -> ExtractionResult:
         """按 doc 扩展名分发：代码扩展名 → CodeTrack，其余 → SemanticTrack。"""
         if doc.path.suffix.lower() in supported_code_suffixes():
             return self._code_track.extract(doc)
+        # 双重检查锁：避免文档级并发首调构造多个 SemanticTrack
         if self._semantic_track is None:
-            self._semantic_track = SemanticTrack(self._llm, self._settings)
+            with self._sem_lock:
+                if self._semantic_track is None:
+                    self._semantic_track = SemanticTrack(self._llm, self._settings)
         return self._semantic_track.extract(doc)
 
 

@@ -35,6 +35,7 @@ ChromaDB），不消耗 LLM chat Token。
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import logging
 from collections.abc import Callable
@@ -277,16 +278,20 @@ def compile(  # noqa: A001  — 故意与内建同名，方案 §3.5.1 指定
     cached_count = 0
 
     to_process = sorted(set(changes.added) | set(changes.modified))
-    total = len(to_process)
-    for idx, path in enumerate(to_process, 1):
+
+    def _process_one_file(
+        path: str,
+    ) -> tuple[str, ExtractionResult | None, str | None, bool, bool]:
+        """单文件处理：ingest → cache.get → extract → cache.put（方案 §3.4，Feature s1-feat-004）。
+
+        返回 ``(path, result_or_None, sha256_or_None, is_skipped, was_cached)``。
+        线程安全：``ingest_file`` / ``cache`` 无共享状态；``extractor`` 共享单例
+        （``DefaultExtractor`` DCL + ``SemanticTrack`` 无状态），可跨文档并发调用。
+        worker 只返回不可变元组，``results_map``/``sha_map``/``skipped``/``cached_count``
+        由主线程在归并时写（无锁、无竞态）。
+        """
         abs_path = raw_dir / path
-        logger.info(
-            "[%d/%d] ingesting %s ...",
-            idx,
-            total,
-            path,
-            extra={"stage": "compile-ingest", "file": path},
-        )
+        logger.info("ingesting %s ...", path, extra={"stage": "compile-ingest", "file": path})
         try:
             doc = ingest_file(abs_path, raw_dir, registry, settings)
         except UnsupportedFormatError as exc:
@@ -296,63 +301,96 @@ def compile(  # noqa: A001  — 故意与内建同名，方案 §3.5.1 指定
                 exc,
                 extra={"stage": "compile-ingest", "file": path},
             )
-            skipped.append(path)
-            continue
+            return (path, None, None, True, False)
         except Exception:
             logger.exception(
                 "ingest failed for %s",
                 path,
                 extra={"stage": "compile-ingest", "file": path},
             )
-            skipped.append(path)
-            continue
+            return (path, None, None, True, False)
 
         cached = cache.get(doc.sha256, extraction_sig, settings.llm_model)
         if cached is not None:
-            result = cached
+            logger.info(
+                "cache hit %s → %d triples, %d concepts",
+                path,
+                len(cached.triples),
+                len(cached.concepts),
+                extra={"stage": "compile-extract", "file": path},
+            )
+            return (path, _normalize_result_source(cached, path), doc.sha256, False, True)
+
+        try:
+            result = extractor.extract(doc)
+        except Exception:
+            logger.exception(
+                "extraction failed for %s",
+                path,
+                extra={"stage": "compile-extract", "file": path},
+            )
+            return (path, None, None, True, False)
+
+        try:
+            cache.put(doc.sha256, extraction_sig, settings.llm_model, result)
+        except Exception:
+            logger.warning(
+                "cache put failed for %s; result kept in memory",
+                path,
+                extra={"stage": "compile-extract", "file": path},
+            )
+
+        logger.info(
+            "extracted %s → %d triples, %d concepts",
+            path,
+            len(result.triples),
+            len(result.concepts),
+            extra={"stage": "compile-extract", "file": path},
+        )
+        return (path, _normalize_result_source(result, path), doc.sha256, False, False)
+
+    def _merge_outcome(
+        path: str,
+        result: ExtractionResult | None,
+        sha: str | None,
+        is_skipped: bool,
+        was_cached: bool,
+    ) -> None:
+        """主线程归并单个文件结果到 results_map/sha_map/skipped/cached_count。"""
+        nonlocal cached_count
+        if is_skipped:
+            skipped.append(path)
+            return
+        assert result is not None and sha is not None
+        results_map[path] = result
+        sha_map[path] = sha
+        if was_cached:
             cached_count += 1
-            logger.info(
-                "[%d/%d] cache hit %s → %d triples, %d concepts",
-                idx,
-                total,
-                path,
-                len(result.triples),
-                len(result.concepts),
-                extra={"stage": "compile-extract", "file": path},
-            )
-        else:
-            try:
-                result = extractor.extract(doc)
-            except Exception:
-                logger.exception(
-                    "extraction failed for %s",
-                    path,
-                    extra={"stage": "compile-extract", "file": path},
-                )
-                skipped.append(path)
-                continue
 
-            try:
-                cache.put(doc.sha256, extraction_sig, settings.llm_model, result)
-            except Exception:
-                logger.warning(
-                    "cache put failed for %s; result kept in memory",
-                    path,
-                    extra={"stage": "compile-extract", "file": path},
-                )
-
-            logger.info(
-                "[%d/%d] extracted %s → %d triples, %d concepts",
-                idx,
-                total,
-                path,
-                len(result.triples),
-                len(result.concepts),
-                extra={"stage": "compile-extract", "file": path},
-            )
-
-        results_map[path] = _normalize_result_source(result, path)
-        sha_map[path] = doc.sha256
+    # ── 阶段 A：抽取（可配置文档级并发；失败安全——任一文件失败仅记日志标 skip） ──
+    # concurrency<=1 串行回退（默认，零回归）；>1 用 ThreadPoolExecutor 并发，
+    # 主线程 as_completed 归并。阶段 B 在 with 块退出（全部 join）后才执行。
+    doc_concurrency = max(1, settings.extract_doc_concurrency)
+    if doc_concurrency == 1:
+        for path in to_process:
+            _merge_outcome(*_process_one_file(path))
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=doc_concurrency) as pool:
+            futures = {pool.submit(_process_one_file, path): path for path in to_process}
+            for future in concurrent.futures.as_completed(futures):
+                path = futures[future]
+                try:
+                    outcome = future.result()
+                except Exception:
+                    # 兜底：_process_one_file 内部异常未捕获时的最终隔离
+                    logger.exception(
+                        "unexpected failure processing %s",
+                        path,
+                        extra={"stage": "compile-extract", "file": path},
+                    )
+                    skipped.append(path)
+                    continue
+                _merge_outcome(*outcome)
 
     # ── 阶段 B：破坏性变更（抽取全部成功后统一执行） ──────────────────
 
@@ -652,8 +690,13 @@ def answer_query(
         embedder = _resolve_embedder(settings, embedding_client, llm)
 
         retrievers = _build_retrievers_for_mode(
-            mode, graph, llm, settings,
-            embedder=embedder, vector_store=vector_store, communities=communities,
+            mode,
+            graph,
+            llm,
+            settings,
+            embedder=embedder,
+            vector_store=vector_store,
+            communities=communities,
         )
     multi = MultiRetriever(retrievers, settings, llm, progress=progress_reporter)
     hits = multi.recall(question)

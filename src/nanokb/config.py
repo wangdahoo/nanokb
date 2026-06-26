@@ -91,6 +91,10 @@ class Settings(BaseSettings):
     # 实际对 API 的并发请求数 = extract_doc_concurrency × extract_chunk_concurrency，
     # 由全局 RateLimiter 统一节流。
     extract_chunk_concurrency: int = 4
+    # 文档级并发度：阶段 A 同时处理的文件数（方案 §3.1，Feature s1-feat-004）。
+    # 0/1 = 串行（默认，严格向后兼容）；文档级涉及 ingest/CodeTrack（GIL 受限）
+    # 与 cache.put 竞争面，风险更大，由用户显式开启。纯代码库不建议开（GIL 无收益）。
+    extract_doc_concurrency: int = 1
 
     # ── 检索/问答 ───────────────────────────────────────────────────
     retrieval_hops: int = 2
