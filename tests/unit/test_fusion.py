@@ -22,6 +22,7 @@ from typing import Any
 
 import networkx as nx
 
+from nanokb.compile.normalize import normalize_entity
 from nanokb.config import Settings
 from nanokb.index.community import Community, CommunityResult
 from nanokb.index.vector_store import VectorStore
@@ -405,6 +406,92 @@ def test_community_retriever_ner_empty_returns_empty() -> None:
     retriever = CommunityRetriever(_community_result(), g, llm, Settings())
 
     assert retriever.recall("q") == []
+
+
+# ── 成员倒排索引等价性（s2-feat-004） ────────────────────────────────
+
+
+def _naive_community_recall(
+    communities: CommunityResult, entities: list[str]
+) -> list[tuple[int, float]]:
+    """朴素线性扫描参考实现（s2-feat-004 对照）：返回 (community_id, score) 顺序列表。"""
+    norm_entities = {normalize_entity(e) for e in entities if normalize_entity(e)}
+    if not norm_entities:
+        return []
+    out: list[tuple[int, float]] = []
+    denom = len(norm_entities)
+    for comm in communities.communities:
+        norm_members = {normalize_entity(m) for m in comm.members}
+        overlap = norm_entities & norm_members
+        if overlap:
+            out.append((comm.id, len(overlap) / denom))
+    return out
+
+
+def test_community_inverted_index_matches_naive_scan() -> None:
+    """s2-feat-004 等价性：倒排索引结果与朴素线性扫描逐社区（id+score+顺序）相等。"""
+    import random
+
+    rng = random.Random(20260627)
+    pool = [
+        "Transformer", "Attention", "Model", "Python", "Java", "RNN",
+        "CNN", "LSTM", "GPU", "CPU", "Encoder", "Decoder", "Token",
+        "Embedding", "Softmax", "CUDA", "梯度", "损失函数", "优化器",
+    ]
+    # 构造 8 个社区，每个随机 2-5 成员（含大小写/重复差异以测归一化）
+    comms = []
+    for cid in range(8):
+        k = rng.randint(2, 5)
+        members = rng.sample(pool, k)
+        comms.append(
+            Community(
+                id=cid,
+                members=members,
+                size=len(members),
+                summary=f"community {cid}",
+                source_files=[f"f{cid}.md"],
+            )
+        )
+    communities = CommunityResult(communities=comms, total_nodes=len(pool))
+
+    g = nx.MultiDiGraph()
+    # 多组随机实体查询对照
+    for trial in range(20):
+        ents = rng.sample(pool, rng.randint(1, 5))
+        llm = FakeLLMClient(responses=[_ner(ents)])
+        retriever = CommunityRetriever(communities, g, llm, Settings())
+        hits = retriever.recall("q")
+
+        naive = _naive_community_recall(communities, ents)
+        assert [(h.concept.name.removeprefix("community-"), round(h.score, 10)) for h in hits] == [
+            (str(cid), round(s, 10)) for cid, s in naive
+        ], f"trial {trial} ents={ents} mismatch"
+
+
+def test_community_inverted_index_dedup_member_normalization() -> None:
+    """s2-feat-004：同社区重复成员（含大小写变体）只计一次 overlap，与朴素扫描一致。"""
+    communities = CommunityResult(
+        communities=[
+            Community(
+                id=0,
+                members=["Transformer", "transformer", "TRANSFORMER", "Attention"],
+                size=4,
+                summary="dup community.",
+                source_files=["d.md"],
+            )
+        ],
+        total_nodes=2,
+    )
+    g = nx.MultiDiGraph()
+    # NER 抽出 ["Transformer"] → 归一化后仅 1 个实体命中 1 个（去重后）成员
+    llm = FakeLLMClient(responses=[_ner(["Transformer"])])
+    retriever = CommunityRetriever(communities, g, llm, Settings())
+
+    hits = retriever.recall("q")
+    naive = _naive_community_recall(communities, ["Transformer"])
+    assert len(hits) == len(naive)
+    assert hits[0].score == naive[0][1] == 1.0  # 1 命中实体 / 1 实体
+
 
 
 # ══════════════════════════════════════════════════════════════════════

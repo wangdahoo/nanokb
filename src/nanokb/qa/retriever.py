@@ -57,7 +57,7 @@ except ImportError:  # pragma: no cover - optional dependency absent
     _rf_process = None  # type: ignore[assignment]
 
 if TYPE_CHECKING:
-    from nanokb.index.community import CommunityResult
+    from nanokb.index.community import Community, CommunityResult
     from nanokb.index.vector_store import VectorStore
 
 logger = logging.getLogger("nanokb")
@@ -463,9 +463,27 @@ class CommunityRetriever:
         self._graph = graph
         self._llm = llm
         self._settings = settings
+        # 成员倒排索引（s2-feat-004）：{normalize(member): [community_id,...]}，
+        # communities 实例不可变，__init__ 预建一次，消除 recall 的逐社区线性扫描
+        # 与每次重复 normalize。同社区重复成员只记一次（保证 overlap 计数口径一致）。
+        self._member_index: dict[str, list[int]] = {}
+        self._communities_by_id: dict[int, Community] = {}
+        for comm in communities.communities:
+            self._communities_by_id[comm.id] = comm
+            seen: set[str] = set()
+            for member in comm.members:
+                nm = normalize_entity(member)
+                if nm and nm not in seen:
+                    seen.add(nm)
+                    self._member_index.setdefault(nm, []).append(comm.id)
 
     def recall(self, question: str) -> list[RetrievalHit]:
-        """社区宏观召回：NER → 社区成员匹配 → 命中社区的摘要 hit 列表。"""
+        """社区宏观召回：NER → 社区成员匹配 → 命中社区的摘要 hit 列表。
+
+        s2-feat-004：用 ``__init__`` 预建的成员倒排索引查询，聚合每个社区命中的
+        归一化实体集合，score = ``len(overlap)/len(norm_entities)``——与原"逐社区
+        全交集"逐社区等价，输出仍按社区原始列表顺序（fuse 稳定排序口径不变）。
+        """
         if not self._communities.communities:
             return []
 
@@ -477,13 +495,23 @@ class CommunityRetriever:
         if not norm_entities:
             return []
 
+        # 倒排查询：聚合每个社区命中的 norm_entity（O(实体数 × 平均命中社区数)）
+        hits_per_community: dict[int, set[str]] = {}
+        for ne in norm_entities:
+            for cid in self._member_index.get(ne, ()):
+                hits_per_community.setdefault(cid, set()).add(ne)
+
+        if not hits_per_community:
+            return []
+
+        denom = len(norm_entities)
         hits: list[RetrievalHit] = []
+        # 按社区原始列表顺序输出（保持与线性扫描一致的入序，fuse 稳定排序口径不变）
         for comm in self._communities.communities:
-            norm_members = {normalize_entity(m) for m in comm.members}
-            overlap = norm_entities & norm_members
+            overlap = hits_per_community.get(comm.id)
             if not overlap:
                 continue
-            similarity = len(overlap) / len(norm_entities)
+            similarity = len(overlap) / denom
             source_file = comm.source_files[0] if comm.source_files else ""
             hits.append(
                 RetrievalHit(
