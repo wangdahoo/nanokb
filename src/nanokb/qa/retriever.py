@@ -142,6 +142,11 @@ class GraphRetriever:
         self._graph = graph
         self._llm = llm
         self._settings = settings
+        # 归一化索引懒缓存（s2-feat-001）：graph 实例生命周期内只读，
+        # 首次 recall 时构建一次并复用，避免每次 recall 重建 O(N)。
+        self._norm_index: dict[str, list[str]] | None = None
+        # 构建计数（测试/诊断用，验证缓存命中）。
+        self._norm_index_builds: int = 0
 
     def recall(self, question: str) -> list[RetrievalHit]:
         """从问题召回图谱 hit 列表。
@@ -169,7 +174,7 @@ class GraphRetriever:
 
     def _collect_seed_nodes(self, entities: list[str]) -> set[str]:
         """对每个实体先做归一化精确匹配，未命中走 fuzzy 兜底。"""
-        norm_index = self._build_normalized_node_index()
+        norm_index = self._ensure_norm_index()
         all_norms = list(norm_index.keys())
         cutoff = self._settings.fuzzy_match_cutoff
 
@@ -187,15 +192,20 @@ class GraphRetriever:
                     seeds.update(norm_index[m])
         return seeds
 
-    def _build_normalized_node_index(self) -> dict[str, list[str]]:
-        """构建 ``{normalize(node): [original_node, ...]}`` 索引。
+    def _ensure_norm_index(self) -> dict[str, list[str]]:
+        """懒构建并缓存 ``{normalize(node): [original_node, ...]}`` 索引（s2-feat-001）。
 
-        同一归一化形式可能对应多个原始节点（极少见但理论可能），全部保留。
+        graph 在 retriever 实例生命周期内视为只读，故索引构建一次后复用，
+        避免每次 recall 重建 O(N)。同一归一化形式可能对应多个原始节点
+        （极少见但理论可能），全部保留。
         """
-        index: dict[str, list[str]] = {}
-        for node in self._graph.nodes():
-            index.setdefault(normalize_entity(node), []).append(node)
-        return index
+        if self._norm_index is None:
+            index: dict[str, list[str]] = {}
+            for node in self._graph.nodes():
+                index.setdefault(normalize_entity(node), []).append(node)
+            self._norm_index = index
+            self._norm_index_builds += 1
+        return self._norm_index
 
     # ── N 跳子图扩展 ─────────────────────────────────────────────────
 

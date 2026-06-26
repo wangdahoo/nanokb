@@ -318,3 +318,21 @@ def test_parallel_edges_same_relation_deduplicated() -> None:
     hits = retriever.recall("q")
     # 两条 parallel edge 去重为 1
     assert len(hits) == 1
+
+
+# ── 归一化索引懒缓存（s2-feat-001） ──────────────────────────────────
+
+
+def test_norm_index_cached_across_recalls() -> None:
+    """s2-feat-001：连续两次 recall 复用同一归一化索引，构建计数 == 1。"""
+    graph = _build_graph()
+    llm = FakeLLMClient(responses=[_ner_response(["Transformer"]), _ner_response(["Transformer"])])
+    retriever = GraphRetriever(graph, llm, Settings())
+
+    assert retriever._norm_index_builds == 0
+    retriever.recall("q")
+    assert retriever._norm_index_builds == 1
+    retriever.recall("q")
+    # 第二次 recall 命中缓存，不再重建
+    assert retriever._norm_index_builds == 1
+
