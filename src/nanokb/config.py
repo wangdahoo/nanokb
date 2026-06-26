@@ -107,6 +107,9 @@ class Settings(BaseSettings):
     # 子图扩展扇出护栏（s2-feat-007）：BFS 累计边数达上限即提前停止并记 WARNING。
     # 0 = 不限（默认，保持旧行为）；hub 节点扇出大时可设上限防止子图爆炸。
     max_subgraph_edges: int = 0
+    # RetrievalSession 缓存开关（s2-feat-006）：预留，默认关闭。CLI 不消费此项；
+    # 编程式 RetrievalSession 始终按懒加载缓存，此项供未来按需禁用缓存。
+    kb_session_cache: bool = False
 
 
 __all__ = ["Settings"]
