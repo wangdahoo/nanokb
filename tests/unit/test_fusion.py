@@ -614,3 +614,82 @@ def test_multi_retriever_three_routes_integration(tmp_path: Path) -> None:
     assert "community" in sources
     # 融合后非空
     assert len(fused) >= 3
+
+
+# ── MultiRetriever 共享 NER（s2-feat-005） ───────────────────────────
+
+
+def test_multi_retriever_shares_ner_across_graph_and_community(tmp_path: Path) -> None:
+    """s2-feat-005：三路模式下 NER（LLM complete）只被调用 1 次（graph+community 共享）。"""
+    settings = Settings()
+    # 预置 1 个 NER 响应（共享后只需 1 次）
+    llm = FakeLLMClient(responses=[_ner(["Transformer"])], embedding_dim=4)
+
+    g = nx.MultiDiGraph()
+    g.add_node(
+        "Transformer", description="A model.", source_file="doc.md", confidence="EXTRACTED"
+    )
+    g.add_node(
+        "Attention", description="A mechanism.", source_file="doc.md", confidence="EXTRACTED"
+    )
+    g.add_edge(
+        "Transformer", "Attention", relation="uses", source_file="doc.md", confidence="EXTRACTED"
+    )
+
+    vs = VectorStore(tmp_path / "chroma", "test-model", 4)
+    vs.index_nodes(g, llm)
+    communities = _community_result()
+
+    # 记录 index_nodes 之后的 complete 调用数（index_nodes 只调 embed 不调 complete）
+    complete_before = len(llm.calls)
+    multi = MultiRetriever(
+        [
+            GraphRetriever(g, llm, settings),
+            VectorRetriever(vs, llm, settings),
+            CommunityRetriever(communities, g, llm, settings),
+        ],
+        settings,
+        llm,
+    )
+    fused = multi.recall("Transformer")
+
+    # NER 共享：整个 recall 仅 1 次 complete（NER），而非 graph+community 各 1 次
+    ner_calls = len(llm.calls) - complete_before
+    assert ner_calls == 1, f"expected 1 shared NER call, got {ner_calls}"
+    # 三路仍都贡献 hit（共享 NER 不影响召回完整性）
+    assert {"graph", "vector", "community"} <= {h.source for h in fused}
+
+
+def test_multi_retriever_no_ner_call_in_vector_only_mode(tmp_path: Path) -> None:
+    """s2-feat-005：纯向量路（ask 模式）不触发 NER 预调，零 LLM complete 调用。"""
+    settings = Settings()
+    llm = FakeLLMClient(embedding_dim=4)
+
+    g = nx.MultiDiGraph()
+    g.add_node("Alpha", description="Alpha desc.", source_file="doc.md")
+    vs = VectorStore(tmp_path / "chroma", "test-model", 4)
+    vs.index_nodes(g, llm)
+
+    complete_before = len(llm.calls)
+    multi = MultiRetriever([VectorRetriever(vs, llm, settings)], settings, llm)
+    multi.recall("anything")
+
+    # 无 graph/community → 无 NER 预调 → 0 次 complete
+    assert len(llm.calls) - complete_before == 0
+
+
+def test_graph_retriever_single_param_recall_still_self_ners() -> None:
+    """s2-feat-005 向后兼容：直接单参调 GraphRetriever.recall(question) 仍自调 NER。"""
+    g = nx.MultiDiGraph()
+    g.add_node("X", description="X", source_file="f.md", confidence="EXTRACTED")
+    g.add_node("Y", description="Y", source_file="f.md", confidence="EXTRACTED")
+    g.add_edge("X", "Y", relation="r", source_file="f.md", confidence="EXTRACTED")
+
+    llm = FakeLLMClient(responses=[_ner(["X"])])
+    retriever = GraphRetriever(g, llm, Settings())
+    hits = retriever.recall("q")  # 单参，未注入 entities → 自调 NER
+
+    assert len(hits) == 1
+    # 单参路径消耗了 1 次 NER 调用
+    assert len(llm.calls) == 1
+

@@ -165,16 +165,23 @@ class GraphRetriever:
         self._norm_buckets: dict[int, list[str]] | None = None
         self._norm_buckets_builds: int = 0
 
-    def recall(self, question: str) -> list[RetrievalHit]:
+    def recall(
+        self, question: str, *, entities: list[str] | None = None
+    ) -> list[RetrievalHit]:
         """从问题召回图谱 hit 列表。
 
         空图或 NER 抽不出任何可命中实体时返回空列表（上游据此返回
         ``未找到相关知识点``）。
+
+        ``entities``（s2-feat-005）：可选预抽取实体；非 None 时跳过内部 NER
+        直接使用（供 MultiRetriever 共享 NER 结果，消除三路模式重复 LLM 往返）。
+        为 None 时内部调用 ``_ner_entities``（向后兼容单参 recall）。
         """
         if self._graph.number_of_nodes() == 0:
             return []
 
-        entities = _ner_entities(self._llm, question)
+        if entities is None:
+            entities = _ner_entities(self._llm, question)
         if not entities:
             logger.debug("recall: NER returned no entities for question: %s", question)
             return []
@@ -477,17 +484,23 @@ class CommunityRetriever:
                     seen.add(nm)
                     self._member_index.setdefault(nm, []).append(comm.id)
 
-    def recall(self, question: str) -> list[RetrievalHit]:
+    def recall(
+        self, question: str, *, entities: list[str] | None = None
+    ) -> list[RetrievalHit]:
         """社区宏观召回：NER → 社区成员匹配 → 命中社区的摘要 hit 列表。
 
         s2-feat-004：用 ``__init__`` 预建的成员倒排索引查询，聚合每个社区命中的
         归一化实体集合，score = ``len(overlap)/len(norm_entities)``——与原"逐社区
         全交集"逐社区等价，输出仍按社区原始列表顺序（fuse 稳定排序口径不变）。
+
+        ``entities``（s2-feat-005）：可选预抽取实体；非 None 时跳过内部 NER
+        直接使用（供 MultiRetriever 共享 NER 结果）。为 None 时内部调用 ``_ner_entities``。
         """
         if not self._communities.communities:
             return []
 
-        entities = _ner_entities(self._llm, question)
+        if entities is None:
+            entities = _ner_entities(self._llm, question)
         if not entities:
             return []
 
@@ -532,6 +545,10 @@ class CommunityRetriever:
 
 # ── MultiRetriever + fuse（s1-feat-012） ──────────────────────────────
 
+#: 需 NER 的 retriever 类型（s2-feat-005）：MultiRetriever 对其共享一次 NER 结果。
+#: VectorRetriever 不需 NER，不在其中——保持其 ``recall(question)`` 单参签名不变。
+_NER_RETRIEVERS = (GraphRetriever, CommunityRetriever)
+
 
 class MultiRetriever:
     """多路召回编排器：按命令映射启用 retriever 子集，融合 fuse 重排。
@@ -561,13 +578,27 @@ class MultiRetriever:
 
         每路召回与 fuse 各自包进一个 ``progress.stage``，向 CLI 报告检索进度
         （``progress=None`` 时为空实现，行为与无进度反馈一致）。
+
+        s2-feat-005：若启用的 retriever 中含需 NER 的 graph/community 路，则
+        统一预调一次 ``_ner_entities`` 并把结果注入两路，消除三路模式下
+        GraphRetriever 与 CommunityRetriever 各调一次 NER 的重复 LLM 往返（2→1）。
+        纯向量路（ask 模式）不触发预调，零开销。
         """
+        # 是否存在需 NER 的 retriever（graph/community）；若有则共享一次 NER 结果
+        ner_present = any(isinstance(r, _NER_RETRIEVERS) for r in self._retrievers)
+        shared_entities = (
+            _ner_entities(self._llm, question) if ner_present else None
+        )
+
         all_hits: list[RetrievalHit] = []
         for retriever in self._retrievers:
             label = _SOURCE_LABELS.get(retriever.SOURCE, retriever.SOURCE)
             with self._progress.stage(f"{label}中..."):
                 try:
-                    hits = retriever.recall(question)
+                    if isinstance(retriever, _NER_RETRIEVERS):
+                        hits = retriever.recall(question, entities=shared_entities)
+                    else:
+                        hits = retriever.recall(question)
                 except Exception:
                     logger.warning(
                         "retriever %s failed; degrading to empty",

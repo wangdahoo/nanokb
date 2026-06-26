@@ -130,11 +130,11 @@ def test_query_three_route_fusion_hits_all_sources(tmp_path: Path) -> None:
     """AC #1：query 命中来源覆盖 graph + vector + community 三路。"""
     settings = _build_full_kb(tmp_path)
 
-    # query 三路：graph NER + community NER + generate（vector 用 embed 不调 complete）
-    ner1 = _ner(["Transformer"])
-    ner2 = _ner(["Transformer"])
+    # query 三路（s2-feat-005 NER 共享）：MultiRetriever 预调 1 次 NER 供 graph+community
+    # 共用，再加 1 次 generate（vector 用 embed 不调 complete）。
+    ner = _ner(["Transformer"])
     gen = "Transformer 通过 self-attention 依赖 Attention^[doc.md]。"
-    llm = FakeLLMClient(responses=[ner1, ner2, gen])
+    llm = FakeLLMClient(responses=[ner, gen])
 
     result = pipeline.answer_query(settings, "Transformer 如何依赖 Attention？", llm=llm)
 
@@ -151,10 +151,10 @@ def test_query_fusion_ranks_extracted_above_inferred(tmp_path: Path) -> None:
     """AC #1+AC #5：三路融合后 EXTRACTED 边排在 INFERRED 边前。"""
     settings = _build_full_kb(tmp_path)
 
-    ner1 = _ner(["Transformer"])
-    ner2 = _ner(["Transformer"])
+    # s2-feat-005：graph+community 共享 1 次 NER，再加 generate。
+    ner = _ner(["Transformer"])
     gen = "answer^[doc.md]"
-    llm = FakeLLMClient(responses=[ner1, ner2, gen])
+    llm = FakeLLMClient(responses=[ner, gen])
 
     result = pipeline.answer_query(settings, "q", llm=llm)
 
