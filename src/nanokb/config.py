@@ -104,6 +104,9 @@ class Settings(BaseSettings):
     fuzzy_match_cutoff: float = 0.8
     min_hit_count: int = 3
     min_confidence_score: float = 0.3
+    # 子图扩展扇出护栏（s2-feat-007）：BFS 累计边数达上限即提前停止并记 WARNING。
+    # 0 = 不限（默认，保持旧行为）；hub 节点扇出大时可设上限防止子图爆炸。
+    max_subgraph_edges: int = 0
 
 
 __all__ = ["Settings"]

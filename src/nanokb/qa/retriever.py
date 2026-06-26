@@ -303,6 +303,9 @@ class GraphRetriever:
 
         种子节点本身无条件入图（即便无任何边）；BFS 每轮把当前层节点的出/入边
         端点纳入下一层。``retrieval_hops <= 0`` 时仅含种子节点本身。
+
+        s2-feat-007：``max_subgraph_edges > 0`` 时，BFS 累计边数达上限即提前停止
+        并记 WARNING，防止 hub 节点扇出过大拉出巨量子图；默认 0 不限（旧行为）。
         """
         sub = nx.MultiDiGraph()
         for seed in seeds:
@@ -315,14 +318,18 @@ class GraphRetriever:
         if hops <= 0:
             return sub
 
+        max_edges = self._settings.max_subgraph_edges
         visited: set[str] = set()
         current: set[str] = {s for s in seeds if s in self._graph}
+        capped = False
 
         for _ in range(hops):
-            if not current:
+            if not current or capped:
                 break
             next_level: set[str] = set()
             for node in current:
+                if capped:
+                    break
                 if node in visited:
                     continue
                 visited.add(node)
@@ -333,6 +340,12 @@ class GraphRetriever:
                         sub.nodes[tail].update(dict(self._graph.nodes[tail]))
                         if tail not in visited:
                             next_level.add(tail)
+                    if max_edges > 0 and sub.number_of_edges() >= max_edges:
+                        capped = True
+                        break
+
+                if capped:
+                    break
 
                 for head, _, key, data in self._graph.in_edges(node, keys=True, data=True):
                     sub.add_edge(head, node, key=key, **dict(data))
@@ -340,8 +353,18 @@ class GraphRetriever:
                         sub.nodes[head].update(dict(self._graph.nodes[head]))
                         if head not in visited:
                             next_level.add(head)
+                    if max_edges > 0 and sub.number_of_edges() >= max_edges:
+                        capped = True
+                        break
 
             current = next_level
+
+        if capped:
+            logger.warning(
+                "subgraph truncated at max_subgraph_edges=%d",
+                max_edges,
+                extra={"stage": "qa-retriever"},
+            )
 
         return sub
 

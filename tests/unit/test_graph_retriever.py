@@ -451,4 +451,46 @@ def test_fuzzy_match_below_cutoff_empty_both_backends(monkeypatch) -> None:
         assert retriever.recall("q") == []
 
 
+# ── 子图扩展扇出护栏（s2-feat-007） ──────────────────────────────────
+
+
+def test_max_subgraph_edges_caps_and_warns(caplog) -> None:
+    """s2-feat-007：max_subgraph_edges=K 时 hub 图召回边数 <= K 且产生 WARNING。"""
+    import logging as _logging
+
+    g = nx.MultiDiGraph()
+    # hub 节点 H 连 5 个邻居（共 5 条出边）
+    for n in ("H", "N1", "N2", "N3", "N4", "N5"):
+        g.add_node(n, description=n, source_file="f.md", confidence="EXTRACTED")
+    for n in ("N1", "N2", "N3", "N4", "N5"):
+        g.add_edge("H", n, relation="r", source_file="f.md", confidence="EXTRACTED")
+
+    llm = FakeLLMClient(responses=[_ner_response(["H"])])
+    retriever = GraphRetriever(g, llm, Settings(retrieval_hops=1, max_subgraph_edges=3))
+
+    with caplog.at_level(_logging.WARNING, logger="nanokb"):
+        hits = retriever.recall("q")
+
+    edge_hits = [h for h in hits if h.triple is not None]
+    assert len(edge_hits) <= 3
+    assert any("truncated" in rec.message for rec in caplog.records)
+
+
+def test_max_subgraph_edges_zero_no_cap() -> None:
+    """s2-feat-007：默认 max_subgraph_edges=0 不限，hub 图全部边都召回（旧行为）。"""
+    g = nx.MultiDiGraph()
+    for n in ("H", "N1", "N2", "N3"):
+        g.add_node(n, description=n, source_file="f.md", confidence="EXTRACTED")
+    for n in ("N1", "N2", "N3"):
+        g.add_edge("H", n, relation="r", source_file="f.md", confidence="EXTRACTED")
+
+    llm = FakeLLMClient(responses=[_ner_response(["H"])])
+    retriever = GraphRetriever(g, llm, Settings(retrieval_hops=1))  # max_subgraph_edges 默认 0
+
+    hits = retriever.recall("q")
+    edge_hits = [h for h in hits if h.triple is not None]
+    assert len(edge_hits) == 3  # 不裁剪，全召回
+
+
+
 
