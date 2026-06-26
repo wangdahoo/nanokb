@@ -336,3 +336,67 @@ def test_norm_index_cached_across_recalls() -> None:
     # 第二次 recall 命中缓存，不再重建
     assert retriever._norm_index_builds == 1
 
+
+# ── fuzzy 长度桶安全预筛（s2-feat-002） ──────────────────────────────
+
+
+def test_norm_buckets_cached_across_recalls() -> None:
+    """s2-feat-002：长度桶与 norm_index 同生命周期，连续 recall 构建计数 == 1。"""
+    graph = _build_graph()
+    # 两次 fuzzy 兜底（实体拼写有误 → 走 fuzzy 分支触发桶构建）
+    llm = FakeLLMClient(responses=[_ner_response(["Transfomer"]), _ner_response(["Atention"])])
+    retriever = GraphRetriever(graph, llm, Settings())
+
+    assert retriever._norm_buckets_builds == 0
+    retriever.recall("q")
+    assert retriever._norm_buckets_builds == 1
+    retriever.recall("q")
+    assert retriever._norm_buckets_builds == 1
+
+
+def test_fuzzy_candidates_matches_naive_difflib() -> None:
+    """s2-feat-002 等价性：长度桶预筛返回的候选是 difflib 全量的安全超集，
+    且在该候选集上跑 get_close_matches 的最终命中 == 全量 difflib 命中。"""
+    import difflib as _difflib
+
+    g = nx.MultiDiGraph()
+    # 长度差异大的节点名：短词 + 长词混合
+    names = ["Transformer", "Attention", "Model", "AI", "ML", "ConvolutionalNeuralNetwork"]
+    for n in names:
+        g.add_node(n, description=n, source_file="f.md", confidence="EXTRACTED")
+
+    retriever = GraphRetriever(g, FakeLLMClient(), Settings(fuzzy_match_cutoff=0.8))
+    norm_index = retriever._ensure_norm_index()
+    all_norms = list(norm_index.keys())
+
+    for query in ["Transfomer", "Atention", "model", "AI", "ConvolutionalNetwork", "Quantum"]:
+        norm = query.lower()
+        candidates = retriever._fuzzy_candidates(norm, 0.8)
+        # 候选是全量的子集
+        assert set(candidates).issubset(set(all_norms))
+        # 在候选上跑 get_close_matches == 全量结果（安全超集，不丢命中）
+        naive = _difflib.get_close_matches(norm, all_norms, n=3, cutoff=0.8)
+        bucketed = _difflib.get_close_matches(norm, candidates, n=3, cutoff=0.8)
+        assert bucketed == naive, f"mismatch for {query!r}: bucketed={bucketed} naive={naive}"
+
+
+def test_fuzzy_candidates_empty_for_disjoint_length() -> None:
+    """s2-feat-002：查询长度与所有节点名长度比 < cutoff/(2-cutoff) 时无候选。"""
+    g = nx.MultiDiGraph()
+    # 只有长名（22 字符），查询很短（如 "ai" 2 字符）：2/22 < 2/3 → 被剪
+    g.add_node("ConvolutionalNeuralNetwork", description="long", source_file="f.md", confidence="EXTRACTED")
+    retriever = GraphRetriever(g, FakeLLMClient(), Settings(fuzzy_match_cutoff=0.8))
+
+    assert retriever._fuzzy_candidates("ai", 0.8) == []
+    # 反向：长查询对短名也剪
+    retriever2 = GraphRetriever(
+        nx.MultiDiGraph(),  # placeholder, rebuild below
+        FakeLLMClient(),
+        Settings(fuzzy_match_cutoff=0.8),
+    )
+    g2 = nx.MultiDiGraph()
+    g2.add_node("AI", description="short", source_file="f.md", confidence="EXTRACTED")
+    retriever2 = GraphRetriever(g2, FakeLLMClient(), Settings(fuzzy_match_cutoff=0.8))
+    assert retriever2._fuzzy_candidates("convolutionalneuralnetwork", 0.8) == []
+
+

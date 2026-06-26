@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import difflib
 import logging
+import math
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Protocol
 
@@ -147,6 +148,10 @@ class GraphRetriever:
         self._norm_index: dict[str, list[str]] | None = None
         # 构建计数（测试/诊断用，验证缓存命中）。
         self._norm_index_builds: int = 0
+        # 长度桶懒缓存（s2-feat-002）：{len(name): [name,...]}，fuzzy 预筛用，
+        # 与 _norm_index 同生命周期构建一次。
+        self._norm_buckets: dict[int, list[str]] | None = None
+        self._norm_buckets_builds: int = 0
 
     def recall(self, question: str) -> list[RetrievalHit]:
         """从问题召回图谱 hit 列表。
@@ -173,9 +178,15 @@ class GraphRetriever:
     # ── 实体匹配（精确 + fuzzy） ─────────────────────────────────────
 
     def _collect_seed_nodes(self, entities: list[str]) -> set[str]:
-        """对每个实体先做归一化精确匹配，未命中走 fuzzy 兜底。"""
+        """对每个实体先做归一化精确匹配，未命中走 fuzzy 兜底。
+
+        fuzzy 兜底（s2-feat-002）先用长度桶预筛候选——``difflib`` 的 ratio
+        ``r = 2M/(la+lb)`` 要 ``>= cutoff`` 必须 ``min_len/max_len >= cutoff/(2-cutoff)``，
+        故仅对长度落在 ``[ceil(L·cutoff/(2-cutoff)), floor(L·(2-cutoff)/cutoff)]`` 的
+        归一化名跑 ``difflib.get_close_matches``。这是 ``difflib`` 自身
+        ``real_quick_ratio`` 的同判据安全超集，命中集合不变，仅削减 Python 层循环开销。
+        """
         norm_index = self._ensure_norm_index()
-        all_norms = list(norm_index.keys())
         cutoff = self._settings.fuzzy_match_cutoff
 
         seeds: set[str] = set()
@@ -186,8 +197,10 @@ class GraphRetriever:
             if norm in norm_index:
                 seeds.update(norm_index[norm])
                 continue
-            if cutoff > 0.0 and all_norms:
-                matches = difflib.get_close_matches(norm, all_norms, n=3, cutoff=cutoff)
+            if cutoff > 0.0:
+                matches = difflib.get_close_matches(
+                    norm, self._fuzzy_candidates(norm, cutoff), n=3, cutoff=cutoff
+                )
                 for m in matches:
                     seeds.update(norm_index[m])
         return seeds
@@ -206,6 +219,42 @@ class GraphRetriever:
             self._norm_index = index
             self._norm_index_builds += 1
         return self._norm_index
+
+    def _ensure_norm_buckets(self) -> dict[int, list[str]]:
+        """懒构建并缓存 ``{len(name): [normalized_name, ...]}`` 长度桶（s2-feat-002）。
+
+        与 ``_norm_index`` 同生命周期，构建一次复用。供 ``_fuzzy_candidates`` 按长度
+        区间取候选，避免对全部归一化名进入 difflib 循环。
+        """
+        if self._norm_buckets is None:
+            buckets: dict[int, list[str]] = {}
+            for name in self._ensure_norm_index().keys():
+                buckets.setdefault(len(name), []).append(name)
+            self._norm_buckets = buckets
+            self._norm_buckets_builds += 1
+        return self._norm_buckets
+
+    def _fuzzy_candidates(self, norm: str, cutoff: float) -> list[str]:
+        """按长度安全超集返回 fuzzy 候选归一化名（s2-feat-002）。
+
+        ``difflib`` ratio ``>= cutoff`` 的必要条件是
+        ``min(L, M) / max(L, M) >= cutoff / (2 - cutoff)``，故候选长度 M 必落在
+        ``[ceil(L·cutoff/(2-cutoff)), floor(L·(2-cutoff)/cutoff)]``。被排除的候选其
+        ratio 必然 ``< cutoff``，``difflib.get_close_matches`` 本也不会命中——故此过滤
+        是安全超集，不改变最终命中集合。
+        """
+        if cutoff <= 0.0:
+            return []
+        length = len(norm)
+        if length == 0:
+            return []
+        buckets = self._ensure_norm_buckets()
+        lo = max(1, math.ceil(length * cutoff / (2.0 - cutoff)))
+        hi = math.floor(length * (2.0 - cutoff) / cutoff)
+        candidates: list[str] = []
+        for bucket_len in range(lo, hi + 1):
+            candidates.extend(buckets.get(bucket_len, ()))
+        return candidates
 
     # ── N 跳子图扩展 ─────────────────────────────────────────────────
 
