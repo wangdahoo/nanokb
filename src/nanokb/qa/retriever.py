@@ -44,6 +44,18 @@ from nanokb.qa.progress import (
 )
 from nanokb.qa.prompt import render_hit
 
+# 可选 fuzzy 加速后端（s2-feat-003）：rapidfuzz 的 fuzz.ratio 与 difflib ratio 同为
+# Indel 相似度（数值相等，仅刻度 0-100 vs 0-1）；可用则 C 加速，不可用降级 difflib。
+try:
+    from rapidfuzz import fuzz as _rf_fuzz
+    from rapidfuzz import process as _rf_process
+
+    _HAS_RAPIDFUZZ = True
+except ImportError:  # pragma: no cover - optional dependency absent
+    _HAS_RAPIDFUZZ = False
+    _rf_fuzz = None  # type: ignore[assignment]
+    _rf_process = None  # type: ignore[assignment]
+
 if TYPE_CHECKING:
     from nanokb.index.community import CommunityResult
     from nanokb.index.vector_store import VectorStore
@@ -198,12 +210,33 @@ class GraphRetriever:
                 seeds.update(norm_index[norm])
                 continue
             if cutoff > 0.0:
-                matches = difflib.get_close_matches(
-                    norm, self._fuzzy_candidates(norm, cutoff), n=3, cutoff=cutoff
+                matches = self._fuzzy_match(
+                    norm, self._fuzzy_candidates(norm, cutoff), cutoff=cutoff, n=3
                 )
                 for m in matches:
                     seeds.update(norm_index[m])
         return seeds
+
+    def _fuzzy_match(
+        self, norm: str, candidates: list[str], *, cutoff: float, n: int = 3
+    ) -> list[str]:
+        """返回 ``cutoff`` 以上的近似匹配归一化名（s2-feat-003）。
+
+        优先用 rapidfuzz C 后端（``fuzz.ratio`` 与 difflib ratio 数值相等，刻度 0-100，
+        故 ``score_cutoff = cutoff * 100``）；rapidfuzz 不可用时降级回
+        ``difflib.get_close_matches``。唯一差异是 ``n`` 边界并列项 tie-breaking 顺序
+        可能不同——属可接受的 fuzzy 兜底容差（下游 ``_build_hits`` 有去重）。
+        """
+        if _HAS_RAPIDFUZZ:
+            results = _rf_process.extract(
+                norm,
+                candidates,
+                scorer=_rf_fuzz.ratio,
+                score_cutoff=cutoff * 100.0,
+                limit=n,
+            )
+            return [r[0] for r in results]
+        return difflib.get_close_matches(norm, candidates, n=n, cutoff=cutoff)
 
     def _ensure_norm_index(self) -> dict[str, list[str]]:
         """懒构建并缓存 ``{normalize(node): [original_node, ...]}`` 索引（s2-feat-001）。

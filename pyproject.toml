@@ -27,6 +27,12 @@ dependencies = [
     "httpx[socks]>=0.27,<1",
 ]
 
+# 可选 fuzzy 加速后端（s2-feat-003）：rapidfuzz 提供 C 实现的 Indel 相似度，
+# 与 difflib ratio 数值相等。安装命令：uv pip install "nanokb[fuzzy]"。
+# 未安装时 retriever 自动降级回 stdlib difflib，主功能不受影响。
+[project.optional-dependencies]
+fuzzy = ["rapidfuzz>=3.6"]
+
 [project.scripts]
 nanokb = "nanokb.cli:app"
 

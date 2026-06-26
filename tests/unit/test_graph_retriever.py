@@ -400,3 +400,55 @@ def test_fuzzy_candidates_empty_for_disjoint_length() -> None:
     assert retriever2._fuzzy_candidates("convolutionalneuralnetwork", 0.8) == []
 
 
+# ── 可选 rapidfuzz C 后端（s2-feat-003） ─────────────────────────────
+
+
+def test_fuzzy_match_typo_with_rapidfuzz_if_available() -> None:
+    """s2-feat-003：rapidfuzz 可用时，typo 经 fuzzy 命中同一节点（语义等价于 difflib）。"""
+    from nanokb.qa import retriever as retriever_mod
+
+    if not retriever_mod._HAS_RAPIDFUZZ:
+        import pytest
+
+        pytest.skip("rapidfuzz not installed; optional acceleration path unavailable")
+
+    graph = _build_graph()
+    llm = FakeLLMClient(responses=[_ner_response(["Transfomer"])])  # typo
+    retriever = GraphRetriever(graph, llm, Settings(fuzzy_match_cutoff=0.8))
+
+    hits = retriever.recall("q")
+    heads = {h.triple.head for h in hits if h.triple is not None}
+    assert "Transformer" in heads  # rapidfuzz 路径命中同一节点
+
+
+def test_fuzzy_match_degrades_to_difflib_when_rapidfuzz_missing(monkeypatch) -> None:
+    """s2-feat-003：rapidfuzz import 失败时优雅降级回 difflib，行为与现状一致。"""
+    from nanokb.qa import retriever as retriever_mod
+
+    monkeypatch.setattr(retriever_mod, "_HAS_RAPIDFUZZ", False)
+
+    graph = _build_graph()
+    llm = FakeLLMClient(responses=[_ner_response(["Transfomer"])])  # typo
+    retriever = GraphRetriever(graph, llm, Settings(fuzzy_match_cutoff=0.8))
+
+    hits = retriever.recall("q")
+    heads = {h.triple.head for h in hits if h.triple is not None}
+    # 降级路径（difflib）仍命中同一节点
+    assert "Transformer" in heads
+
+
+def test_fuzzy_match_below_cutoff_empty_both_backends(monkeypatch) -> None:
+    """s2-feat-003：低于 cutoff 的实体在两后端都返回空（与现状 test_fuzzy_below_cutoff 一致）。"""
+    from nanokb.qa import retriever as retriever_mod
+
+    for use_rf in (True, False):
+        if use_rf and not retriever_mod._HAS_RAPIDFUZZ:
+            continue
+        monkeypatch.setattr(retriever_mod, "_HAS_RAPIDFUZZ", use_rf)
+        graph = _build_graph()
+        llm = FakeLLMClient(responses=[_ner_response(["QuantumComputing"])])
+        retriever = GraphRetriever(graph, llm, Settings())
+        assert retriever.recall("q") == []
+
+
+
