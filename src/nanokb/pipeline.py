@@ -375,8 +375,9 @@ def compile(  # noqa: A001  — 故意与内建同名，方案 §3.5.1 指定
         for path in to_process:
             _merge_outcome(*_process_one_file(path))
     else:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=doc_concurrency) as pool:
-            futures = {pool.submit(_process_one_file, path): path for path in to_process}
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=doc_concurrency)
+        futures = {pool.submit(_process_one_file, path): path for path in to_process}
+        try:
             for future in concurrent.futures.as_completed(futures):
                 path = futures[future]
                 try:
@@ -391,6 +392,12 @@ def compile(  # noqa: A001  — 故意与内建同名，方案 §3.5.1 指定
                     skipped.append(path)
                     continue
                 _merge_outcome(*outcome)
+            pool.shutdown(wait=True)
+        except KeyboardInterrupt:
+            # Ctrl-C：取消排队任务、不阻塞等待在途 worker（与 semantic_track 一致）；
+            # 失败安全——阶段 A 抽取不触碰 graph/triples/vector 写入。
+            pool.shutdown(wait=False, cancel_futures=True)
+            raise
 
     # ── 阶段 B：破坏性变更（抽取全部成功后统一执行） ──────────────────
 

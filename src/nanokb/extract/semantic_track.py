@@ -141,11 +141,12 @@ class SemanticTrack:
                     parsed = None
                 raw_results.append((chunk.index, parsed))
         else:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
-                future_to_chunk = {
-                    pool.submit(self._extract_chunk_with_retry, chunk): chunk
-                    for chunk in ordered_chunks
-                }
+            pool = concurrent.futures.ThreadPoolExecutor(max_workers=concurrency)
+            future_to_chunk = {
+                pool.submit(self._extract_chunk_with_retry, chunk): chunk
+                for chunk in ordered_chunks
+            }
+            try:
                 done = 0
                 for future in concurrent.futures.as_completed(future_to_chunk):
                     chunk = future_to_chunk[future]
@@ -170,6 +171,15 @@ class SemanticTrack:
                         )
                         parsed = None
                     raw_results.append((chunk.index, parsed))
+                pool.shutdown(wait=True)
+            except KeyboardInterrupt:
+                # Ctrl-C：取消排队中的 future 并立即返回，不阻塞等待在途 LLM HTTP
+                # （with 语句默认 shutdown(wait=True) 会卡住主线程直到全部 worker 完成，
+                # 这是 build 按 Ctrl-C 不立即退出的根因）。失败安全：抽取阶段不触碰
+                # graph/triples/vector 写入，中断只丢弃在途结果（已 cache 的保留）。
+                # worker 线程为非守护线程，进程级即时退出由 CLI 层 os._exit(130) 兜底。
+                pool.shutdown(wait=False, cancel_futures=True)
+                raise
 
         # ── 阶段 2：按 chunk_index 升序回放合并（确定性，主线程串行） ──
         # as_completed 的乱序到达只影响收集顺序；sort 强制升序回放，
