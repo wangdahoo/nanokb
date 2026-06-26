@@ -82,11 +82,17 @@ def _iter_supported_files(root: Path) -> list[Path]:
 
 
 def _rel_key(path: Path, root: Path) -> str:
-    """返回相对 raw_dir 的路径字符串（manifest key 约定）。"""
+    """返回相对 raw_dir 的 POSIX 路径字符串（manifest key 约定）。
+
+    强制正斜杠分隔以跨平台一致：Windows 上 ``str(relative_to)`` 会用反斜杠
+    （如 ``sub\\note.md``），与 manifest key / source_file 口径冲突，导致
+    增量检测与向量删除按 key 比对时失配。``as_posix()`` 在 POSIX 上为 no-op，
+    在 Windows 上转为正斜杠，保证所有平台输出一致。
+    """
     try:
-        return str(path.relative_to(root))
+        return path.relative_to(root).as_posix()
     except ValueError:
-        return str(path)
+        return path.as_posix()
 
 
 def detect_changes(raw_dir: Path, manifest: Manifest, settings: Settings) -> ChangeSet:

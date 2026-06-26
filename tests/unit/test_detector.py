@@ -340,6 +340,22 @@ def test_nested_subdirectory_files_detected(tmp_path: Path) -> None:
     assert "top.md" in changes.added
 
 
+def test_rel_key_always_posix_separator(tmp_path: Path) -> None:
+    """_rel_key 跨平台返回正斜杠路径（manifest key / source_file 口径一致）。
+
+    Windows 上 ``str(relative_to)`` 会产出反斜杠，导致按 key 比对的增量检测、
+    向量删除、manifest 命中失配；强制 POSIX 后 macOS/Linux/Windows 输出一致。
+    """
+    from nanokb.load.detector import _rel_key
+
+    raw_dir = tmp_path / "raw"
+    nested = raw_dir / "sub" / "deep" / "note.md"
+
+    key = _rel_key(nested, raw_dir)
+    assert key == "sub/deep/note.md"
+    assert "\\" not in key
+
+
 def test_nonexistent_raw_dir_all_manifest_files_deleted(tmp_path: Path) -> None:
     """raw_dir 不存在时，manifest 所有记录视为 deleted。"""
     raw_dir = tmp_path / "raw"  # 不创建
