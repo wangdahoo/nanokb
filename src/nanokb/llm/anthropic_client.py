@@ -28,6 +28,10 @@ logger = logging.getLogger("nanokb")
 
 _MAX_TOKENS = 4096
 
+#: 单次 embeddings 请求的 input 数组上限（与 OpenAIClient 一致；详见
+#: openai_client._EMBED_INPUT_MAX 的说明）。
+_EMBED_INPUT_MAX = 64
+
 
 class AnthropicClient:
     """Anthropic provider 实现（tool-use JSON 通道）。"""
@@ -123,8 +127,12 @@ class AnthropicClient:
             if self._openai_base_url
             else OpenAI(api_key=self._openai_api_key)
         )
-        resp = client.embeddings.create(model=self._embedding_model, input=texts)
-        return [item.embedding for item in resp.data]
+        out: list[list[float]] = []
+        for start in range(0, len(texts), _EMBED_INPUT_MAX):
+            chunk = texts[start : start + _EMBED_INPUT_MAX]
+            resp = client.embeddings.create(model=self._embedding_model, input=chunk)
+            out.extend(item.embedding for item in resp.data)
+        return out
 
     def count_tokens(self, text: str) -> int:
         # Anthropic 未公开离线 tokenizer；cl100k_base 为最佳可用近似

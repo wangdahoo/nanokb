@@ -48,8 +48,9 @@ EMBEDDING_DIM_KEY = "embedding_dim"
 #: metadata 中记录 embedding 模型的 key
 EMBEDDING_MODEL_KEY = "embedding_model"
 
-#: index_nodes 批量 embed 的最大 batch 大小（避免单次 embed 文本过多）
-EMBED_BATCH_SIZE = 100
+#: index_nodes 批量 embed 的最大 batch 大小（避免单次 embed 文本过多）。
+#: 取 64 与 embedding provider 的 input 上限对齐（智谱 GLM embedding-3 限 64 条）。
+EMBED_BATCH_SIZE = 64
 
 #: search 默认召回数
 DEFAULT_SEARCH_K = 10

@@ -23,6 +23,11 @@ from nanokb.llm.base import ResponseFormat
 
 logger = logging.getLogger("nanokb")
 
+#: 单次 embeddings 请求的 input 数组上限。OpenAI 兼容端点（如智谱 GLM
+#: embedding-3）限制 input 不得超过 64 条（HTTP 400 错误码 1214：
+#: input数组最大不得超过64条）；取 64 兼容所有当前支持的 provider。
+_EMBED_INPUT_MAX = 64
+
 
 class OpenAIClient:
     """OpenAI provider 实现。"""
@@ -134,12 +139,16 @@ class OpenAIClient:
     def embed(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
-        self._throttle()
-        resp = self._client.embeddings.create(
-            model=self._embedding_model,
-            input=texts,
-        )
-        return [item.embedding for item in resp.data]
+        out: list[list[float]] = []
+        for start in range(0, len(texts), _EMBED_INPUT_MAX):
+            chunk = texts[start : start + _EMBED_INPUT_MAX]
+            self._throttle()
+            resp = self._client.embeddings.create(
+                model=self._embedding_model,
+                input=chunk,
+            )
+            out.extend(item.embedding for item in resp.data)
+        return out
 
     def count_tokens(self, text: str) -> int:
         return len(self._get_encoding().encode(text))
