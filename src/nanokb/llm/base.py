@@ -20,6 +20,7 @@ import logging
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from nanokb.config import Settings
+from nanokb.llm.throttle import RateLimiter
 
 logger = logging.getLogger("nanokb")
 
@@ -127,6 +128,9 @@ def make_llm_client(settings: Settings) -> LLMClient:
     （不进入半工作状态，方案 §3.6）。ollama 无需 key（本地服务）。
     """
     provider = settings.llm_provider
+    # chat 端进程级共享 RateLimiter（方案 §3.2.4）：三 provider 共享同一实例，
+    # 保证全局 RPM 语义。interval<=0 时无锁快速返回（ollama / 无限流场景零开销）。
+    chat_rate_limiter = RateLimiter(settings.llm_request_interval)
     if provider == "openai":
         key = settings.openai_api_key
         if key is None or not key.get_secret_value():
@@ -140,7 +144,7 @@ def make_llm_client(settings: Settings) -> LLMClient:
             embedding_model=settings.embedding_model,
             base_url=settings.openai_base_url,
             max_retries=settings.llm_max_retries,
-            request_interval=settings.llm_request_interval,
+            rate_limiter=chat_rate_limiter,
             rate_limit_retries=settings.llm_rate_limit_retries,
         )
 
@@ -161,6 +165,7 @@ def make_llm_client(settings: Settings) -> LLMClient:
                 settings.openai_api_key.get_secret_value() if settings.openai_api_key else None
             ),
             openai_base_url=settings.openai_base_url,
+            rate_limiter=chat_rate_limiter,
         )
 
     if provider == "ollama":
@@ -170,6 +175,7 @@ def make_llm_client(settings: Settings) -> LLMClient:
             base_url=settings.ollama_base_url,
             model=settings.llm_model,
             embedding_model=settings.embedding_model,
+            rate_limiter=chat_rate_limiter,
         )
 
     # Literal 类型保证不会到达；防御性 exit（未知 provider）
@@ -193,6 +199,11 @@ def make_embedding_client(settings: Settings) -> EmbeddingClient:
     会直接复用 chat client，无需调用本工厂；仅在用户显式声明解耦配置时触发。
     """
     provider = settings.embedding_provider
+    # embedding 端独立 RateLimiter（方案 §3.2.4 Medium #1）：与 chat 解耦——embedding
+    # 与 chat 多为不同端点/厂商，限额不同，应独立节流。注意：``_resolve_embedder``
+    # 复用 chat_llm 做 embedding 的情形不经过本工厂，天然共享 chat 的 RateLimiter
+    # （embedding 在阶段 B，阶段 A 已 join，无并发竞争）。
+    embed_rate_limiter = RateLimiter(settings.llm_request_interval)
     if provider == "ollama":
         from nanokb.llm.ollama_client import OllamaClient
 
@@ -200,6 +211,7 @@ def make_embedding_client(settings: Settings) -> EmbeddingClient:
             base_url=settings.ollama_base_url,
             model=settings.llm_model,
             embedding_model=settings.embedding_model,
+            rate_limiter=embed_rate_limiter,
         )
 
     if provider == "openai":
@@ -219,7 +231,7 @@ def make_embedding_client(settings: Settings) -> EmbeddingClient:
             embedding_model=settings.embedding_model,
             base_url=base_url,
             max_retries=settings.llm_max_retries,
-            request_interval=settings.llm_request_interval,
+            rate_limiter=embed_rate_limiter,
             rate_limit_retries=settings.llm_rate_limit_retries,
         )
 

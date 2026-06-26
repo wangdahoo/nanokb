@@ -7,7 +7,9 @@ count_tokens 用 tiktoken.encoding_for_model 精确计数（未知模型降级 c
 速率限制（三重防护）：
 1. SDK 内置 ``max_retries`` 指数退避（429/5xx 自动重试）；
 2. 应用层 ``RateLimitError`` 补充重试（SDK 重试耗尽后再退避重试）；
-3. 请求间最小间隔节流（``request_interval``），控制 RPM 避免触发限额。
+3. 请求间最小间隔节流（注入的线程安全 ``RateLimiter``，方案 §3.2），控制 RPM
+   避免触发限额。由 ``make_llm_client`` / ``make_embedding_client`` 创建进程级
+   共享 / 独立实例注入；``rate_limiter=None`` 时无限流（向后兼容旧默认行为）。
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ from openai import OpenAI, RateLimitError
 from openai.types.chat import ChatCompletionMessageParam
 
 from nanokb.llm.base import ResponseFormat
+from nanokb.llm.throttle import RateLimiter
 
 logger = logging.getLogger("nanokb")
 
@@ -39,7 +42,7 @@ class OpenAIClient:
         embedding_model: str,
         base_url: str | None = None,
         max_retries: int = 6,
-        request_interval: float = 0.0,
+        rate_limiter: RateLimiter | None = None,
         rate_limit_retries: int = 3,
     ) -> None:
         # 仅在显式指定 base_url 时透传，未指定时由 SDK 读 OPENAI_BASE_URL 环境变量或用默认端点
@@ -50,9 +53,10 @@ class OpenAIClient:
         )
         self._model = model
         self._embedding_model = embedding_model
-        self._request_interval = request_interval
+        # 线程安全节流器（方案 §3.2）：由工厂注入进程级共享实例；None 时无限流，
+        # 等价于原 request_interval=0.0 默认行为（保留直接构造的向后兼容）。
+        self._rate_limiter = rate_limiter
         self._rate_limit_retries = rate_limit_retries
-        self._last_call_ts: float | None = None
         # 懒加载：避免构造期触发 tiktoken BPE 文件下载（离线/无缓存环境下构造仍可用）
         self._encoding: tiktoken.Encoding | None = None
 
@@ -63,20 +67,6 @@ class OpenAIClient:
             except KeyError:
                 self._encoding = tiktoken.get_encoding("cl100k_base")
         return self._encoding
-
-    def _throttle(self) -> None:
-        """确保两次 API 调用间至少间隔 ``request_interval`` 秒。"""
-        if self._request_interval <= 0:
-            return
-        now = time.monotonic()
-        if self._last_call_ts is not None:
-            elapsed = now - self._last_call_ts
-            wait = self._request_interval - elapsed
-            if wait > 0:
-                logger.debug("throttling: sleeping %.2fs before next call", wait)
-                time.sleep(wait)
-                now = time.monotonic()
-        self._last_call_ts = now
 
     @staticmethod
     def _compute_backoff(attempt: int) -> float:
@@ -101,7 +91,10 @@ class OpenAIClient:
 
         total_attempts = self._rate_limit_retries + 1
         for attempt in range(total_attempts):
-            self._throttle()
+            # 节流保留在 for attempt 循环内部（与原 _throttle 位置一致）：首次请求
+            # 与每次 RateLimitError 退避后的重试请求都先 acquire（方案 §3.2.3）。
+            if self._rate_limiter is not None:
+                self._rate_limiter.acquire()
             try:
                 if use_json:
                     resp = self._client.chat.completions.create(
@@ -142,7 +135,8 @@ class OpenAIClient:
         out: list[list[float]] = []
         for start in range(0, len(texts), _EMBED_INPUT_MAX):
             chunk = texts[start : start + _EMBED_INPUT_MAX]
-            self._throttle()
+            if self._rate_limiter is not None:
+                self._rate_limiter.acquire()
             resp = self._client.embeddings.create(
                 model=self._embedding_model,
                 input=chunk,

@@ -23,6 +23,7 @@ from anthropic.types import Message
 from openai import OpenAI
 
 from nanokb.llm.base import ResponseFormat
+from nanokb.llm.throttle import RateLimiter
 
 logger = logging.getLogger("nanokb")
 
@@ -43,12 +44,15 @@ class AnthropicClient:
         embedding_model: str,
         openai_api_key: str | None = None,
         openai_base_url: str | None = None,
+        rate_limiter: RateLimiter | None = None,
     ) -> None:
         self._client = Anthropic(api_key=api_key)
         self._model = model
         self._embedding_model = embedding_model
         self._openai_api_key = openai_api_key
         self._openai_base_url = openai_base_url
+        # 线程安全节流器（方案 §3.2）：由 make_llm_client 注入共享实例；None 时无限流。
+        self._rate_limiter = rate_limiter
         # 懒加载：避免构造期触发 tiktoken BPE 文件下载
         self._encoding: tiktoken.Encoding | None = None
 
@@ -64,6 +68,8 @@ class AnthropicClient:
         response_format: ResponseFormat = "json",
         temperature: float = 0.0,
     ) -> str:
+        if self._rate_limiter is not None:
+            self._rate_limiter.acquire()
         if response_format == "json":
             return self._complete_json(system, user, temperature)
         resp = self._client.messages.create(

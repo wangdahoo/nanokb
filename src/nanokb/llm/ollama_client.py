@@ -15,6 +15,7 @@ import httpx
 import tiktoken
 
 from nanokb.llm.base import ResponseFormat
+from nanokb.llm.throttle import RateLimiter
 
 logger = logging.getLogger("nanokb")
 
@@ -24,11 +25,20 @@ _DEFAULT_TIMEOUT = 60.0
 class OllamaClient:
     """Ollama provider 实现（原生 JSON mode）。"""
 
-    def __init__(self, base_url: str, model: str, embedding_model: str) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        model: str,
+        embedding_model: str,
+        rate_limiter: RateLimiter | None = None,
+    ) -> None:
         self._base_url = base_url.rstrip("/")
         self._model = model
         self._embedding_model = embedding_model
         self._client = httpx.Client(timeout=_DEFAULT_TIMEOUT)
+        # 线程安全节流器（方案 §3.2）：本地服务通常 interval=0（RateLimiter 无开销）；
+        # 由 make_llm_client / make_embedding_client 注入；None 时无限流。
+        self._rate_limiter = rate_limiter
         # 懒加载：避免构造期触发 tiktoken BPE 文件下载
         self._encoding: tiktoken.Encoding | None = None
 
@@ -44,6 +54,8 @@ class OllamaClient:
         response_format: ResponseFormat = "json",
         temperature: float = 0.0,
     ) -> str:
+        if self._rate_limiter is not None:
+            self._rate_limiter.acquire()
         payload: dict[str, object] = {
             "model": self._model,
             "messages": [

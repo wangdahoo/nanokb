@@ -14,6 +14,7 @@ import pytest
 from openai import RateLimitError
 
 from nanokb.llm.openai_client import OpenAIClient
+from nanokb.llm.throttle import RateLimiter
 
 
 def _make_rate_limit_error() -> RateLimitError:
@@ -121,12 +122,12 @@ def test_rate_limit_backoff_uses_exponential_delay(
 
 
 def test_throttle_enforces_min_interval(monkeypatch: pytest.MonkeyPatch) -> None:
-    """request_interval > 0 时两次调用间至少间隔指定秒数。"""
+    """注入 RateLimiter(interval>0) 时两次 complete 间至少间隔指定秒数。"""
     client = OpenAIClient(
         api_key="sk-fake",
         model="gpt-4o-mini",
         embedding_model="x",
-        request_interval=2.0,
+        rate_limiter=RateLimiter(interval=2.0),
     )
     client._client.chat.completions.create = MagicMock(return_value=_make_chat_response())
 
@@ -146,12 +147,12 @@ def test_throttle_enforces_min_interval(monkeypatch: pytest.MonkeyPatch) -> None
 def test_throttle_skips_when_interval_zero(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """request_interval=0 时不触发任何 sleep。"""
+    """注入 RateLimiter(interval=0) 时不触发任何 sleep（无限流快速返回）。"""
     client = OpenAIClient(
         api_key="sk-fake",
         model="gpt-4o-mini",
         embedding_model="x",
-        request_interval=0.0,
+        rate_limiter=RateLimiter(interval=0.0),
     )
     client._client.chat.completions.create = MagicMock(return_value=_make_chat_response())
 
@@ -168,12 +169,12 @@ def test_throttle_skips_when_interval_zero(
 
 
 def test_embed_respects_throttle(monkeypatch: pytest.MonkeyPatch) -> None:
-    """embed 调用前也应经过 _throttle。"""
+    """embed 调用前也应经过注入的 RateLimiter 节流。"""
     client = OpenAIClient(
         api_key="sk-fake",
         model="gpt-4o-mini",
         embedding_model="text-embedding-3-small",
-        request_interval=1.5,
+        rate_limiter=RateLimiter(interval=1.5),
     )
     embed_resp = MagicMock()
     embed_resp.data = [MagicMock(embedding=[0.1, 0.2])]
@@ -181,8 +182,8 @@ def test_embed_respects_throttle(monkeypatch: pytest.MonkeyPatch) -> None:
 
     sleep_calls: list[float] = []
     monkeypatch.setattr(time, "sleep", lambda s: sleep_calls.append(s))
-    # _throttle 首次调用：monotonic() ×1（last_call_ts=None，跳过 sleep）
-    # _throttle 第二次调用：monotonic() ×1（计算 elapsed），触发 sleep，再 monotonic() ×1（更新 ts）
+    # acquire 首次调用：monotonic() ×1（_last_ts=None，跳过 sleep）
+    # acquire 第二次调用：monotonic() ×1（计算 elapsed），触发 sleep，再 monotonic() ×1（更新 ts）
     mock_time = MagicMock(side_effect=[100.0, 100.0, 101.5])
     monkeypatch.setattr(time, "monotonic", mock_time)
 
