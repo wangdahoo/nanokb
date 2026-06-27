@@ -1,4 +1,4 @@
-"""内容寻址 embedding 缓存（方案 §4 阶段一，Feature s3-feat-001）。
+"""内容寻址 embedding 缓存（方案 §4 阶段一 + §5 阶段二）。
 
 按 ``sha256(description_sha256|embedding_model|embedding_dim)`` 三维 key 缓存
 ``description → vector``，落盘到 ``out/embed_cache/<key>.json``。key 不含
@@ -10,8 +10,11 @@ source_file，故同 description 跨文档自动共享（内容寻址）；value
 - embedder 在 ``__init__`` 构造时注入持有（与 ``RateLimiter`` 注入 ``OpenAIClient``
   范式一致，Medium #5①）。
 - ``embed_batch`` 独占 cache 查询 + miss 去重（round 3 Opt#1）+ miss 切批(64) +
-  串行 embed + 长度校验（Medium #5②，禁止静默截断）+ 写回 + 原序组装。
-  并发分支（embed_concurrency>1）在 feat-003 叠加。
+  embed + 长度校验（Medium #5②，禁止静默截断）+ 写回 + 原序组装。
+  - 串行分支（``embed_concurrency<=1``，feat-001 基线 / 零回归）。
+  - 并发分支（``embed_concurrency>1``，feat-003）：``ThreadPoolExecutor`` +
+    ``as_completed`` 归并，``with`` + ``except BaseException: cancel_futures=True``
+    失败安全（Medium #2）。
 - cache 与并发正交：``enable_cache=False`` 时 get/put 为 no-op，``embed_batch``
   仍走串行/并发 embed（Medium #4）。
 - ``embedding_dim == 0``（探测失败）时 ``put`` no-op（Opt#4）——避免探测失败期
@@ -24,6 +27,7 @@ import hashlib
 import json
 import logging
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from nanokb.llm.base import EmbeddingClient
@@ -133,14 +137,18 @@ class EmbeddingCache:
         texts: list[str],
         on_progress: Callable[[int, int], None] | None = None,
     ) -> list[list[float]]:
-        """批量 embed：查 cache 命中 → miss 去重 → miss 切批(64) → 串行 embed
-        → 长度校验 → 写回 → 原序组装。
+        """批量 embed：查 cache 命中 → miss 去重 → miss 切批(64) → 串行或并发
+        embed → 长度校验 → 写回 → 原序组装。
 
         本方法封装「查询缓存 + miss 去重 + 批量 embed + 写回」为一个原子动作，
         ``VectorStore.index_nodes`` 调用它替代裸 ``llm.embed(texts)``。
 
-        阶段一（feat-001）只交付串行分支（``embed_concurrency<=1``）；
-        并发分支（``embed_concurrency>1``，ThreadPoolExecutor）在 feat-003 叠加。
+        - 串行分支（``embed_concurrency<=1``，feat-001 基线 / 零回归）。
+        - 并发分支（``embed_concurrency>1``，feat-003）：``ThreadPoolExecutor`` +
+          ``as_completed`` 归并，``with`` + ``except BaseException`` 失败安全
+          取消未决 future（Medium #2）。原序组装在并发乱序返回下正确：每个完成
+          的 batch 携带自身绝对 start 索引，经 miss_idx 回填原始位置，与完成
+          顺序无关（确定性约束）。
 
         Args:
             texts: 待 embed 的 description 文本列表（原序）。
@@ -151,7 +159,8 @@ class EmbeddingCache:
 
         Raises:
             RuntimeError: embedder 返回向量数 != 输入 batch 文本数（Medium #5②，
-                禁止静默截断残 None）。
+                禁止静默截断残 None）；或并发中某 batch embed 抛出（fut.result()
+                重抛 → except BaseException 取消未决 future → 上抛 index_nodes）。
         """
         # 1. 查 cache（主线程）；enable_cache=False 时全部视为 miss
         results: list[list[float] | None] = [self.get(t) for t in texts]
@@ -200,19 +209,30 @@ class EmbeddingCache:
             return len(batch)
 
         # 4. 串行分支（concurrency<=1，阶段一基线 / 零回归）
-        #    并发分支（concurrency>1，ThreadPoolExecutor + as_completed）在 feat-003。
+        #    或并发分支（concurrency>1，阶段二 feat-003：ThreadPoolExecutor +
+        #    as_completed + 失败安全取消未决 future，Medium #2）。
         if concurrency <= 1:
             for start, batch in batches:
                 done += _do_one(start, batch)
                 if on_progress:
                     on_progress(done, len(unique_miss))
-        else:  # pragma: no cover — 并发分支在 feat-003 实现，本 feature 不交付
-            # 占位：feat-003 在此加 ThreadPoolExecutor(max_workers=concurrency)
-            # + as_completed 归并 + except BaseException: pool.shutdown(cancel_futures=True)
-            for start, batch in batches:
-                done += _do_one(start, batch)
-                if on_progress:
-                    on_progress(done, len(unique_miss))
+        else:
+            # ★ Medium #2：with 语句保证退出 shutdown；except BaseException
+            #   覆盖 KeyboardInterrupt 与普通异常，显式 cancel_futures=True
+            #   取消排队未执行的 future（省 Token），随后 raise 上抛由
+            #   index_nodes / pipeline 中断（失败安全，已完成 batch 已写回 cache）。
+            with ThreadPoolExecutor(max_workers=concurrency) as pool:
+                try:
+                    futures = {
+                        pool.submit(_do_one, s, b): (s, b) for s, b in batches
+                    }
+                    for fut in as_completed(futures):
+                        done += fut.result()
+                        if on_progress:
+                            on_progress(done, len(unique_miss))
+                except BaseException:
+                    pool.shutdown(wait=False, cancel_futures=True)
+                    raise
 
         # 5. 广播回填：按原始位置查 dedup_map
         for orig_idx in miss_idx:
