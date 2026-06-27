@@ -96,6 +96,10 @@ class BuildProgress(BaseModel):
     started_at: str = ""
     heartbeat_ts: str = ""
     force: bool = False
+    #: 单调递增的业务活动标记——每次业务写（set_stage / update_* flush）bump，
+    #: heartbeat 写不 bump。check_liveliness 次级判据此字段变化判断主线程是否仍在
+    #: 推进 pipeline（覆盖阶段切换等计数不动场景）。旧文件缺字段默认 0，向后兼容。
+    seq: int = 0
     extract: ExtractProgress = Field(default_factory=ExtractProgress)
     vector: VectorProgress = Field(default_factory=VectorProgress)
     message: str = ""
@@ -199,6 +203,7 @@ class BuildProgressWriter:
         """按阈值或强制标志落盘（调用方须持有 self._lock）。"""
         self._pending += 1
         if force or self._pending >= self.FLUSH_EVERY:
+            self._progress.seq += 1  # 业务活动标记（heartbeat 写不 bump）
             self._write_locked()
             self._pending = 0
 
@@ -212,6 +217,7 @@ class BuildProgressWriter:
             self._progress.stage = stage
             if message:
                 self._progress.message = message
+            self._progress.seq += 1  # 业务活动标记（阶段切换也算推进）
             self._write_locked()
             self._pending = 0
 
@@ -324,14 +330,18 @@ def is_alive(progress: BuildProgress) -> bool:
 
 
 def check_liveliness(out_dir: Path, *, recheck_sec: float | None = None) -> bool:
-    """heartbeat 过期时的次级判据（Medium #1）：sleep ``recheck_sec`` 后重读，计数增长即 alive。
+    """heartbeat 过期时的次级判据（Medium #1）：sleep ``recheck_sec`` 后重读，业务有推进即 alive。
 
     流程：
     1. 读取 ``p0``；None / DONE / INTERRUPTED → False。
     2. heartbeat fresh → True（无需等待）。
     3. heartbeat 过期 → sleep ``recheck_sec``（默认 ``PROGRESS_LIVENESS_RECHECK_SEC``，
-       round 3 Opt#3 可配置）→ 重读 ``p1``；``extract.completed`` 或
-       ``vector.indexed_nodes`` 有增长 → True（不误报僵尸，AC3.7）；否则 False（AC3.6）。
+       round 3 Opt#3 可配置）→ 重读 ``p1``；``seq`` 增长 → True（主线程仍在推进 pipeline，
+       覆盖阶段切换等计数不动场景，AC3.7）；否则 False（AC3.6）。
+
+    注：``seq`` 由业务写（set_stage / update_* flush）bump，heartbeat 写不 bump。
+    故「seq 变化」=「主线程做了 pipeline 推进」，比旧「仅比 extract/vector 两计数」
+    覆盖更广（GRAPH→VECTOR→INDEX 阶段切换时计数不动但 seq 会 bump）。
     """
     if recheck_sec is None:
         recheck_sec = PROGRESS_LIVENESS_RECHECK_SEC
@@ -346,10 +356,7 @@ def check_liveliness(out_dir: Path, *, recheck_sec: float | None = None) -> bool
     p1 = read_progress(out_dir)
     if p1 is None:
         return False
-    return (
-        p1.extract.completed > p0.extract.completed
-        or p1.vector.indexed_nodes > p0.vector.indexed_nodes
-    )
+    return p1.seq > p0.seq
 
 
 __all__ = [

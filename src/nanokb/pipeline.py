@@ -1085,29 +1085,6 @@ def _read_triples_log(out_dir: Path) -> list[dict[str, Any]]:
     return records
 
 
-def _subgraph_for_source(graph: nx.MultiDiGraph, source_file: str) -> nx.MultiDiGraph:
-    """构建 source_file 所属节点的子图（用于 per-path 向量索引）。
-
-    收集所有与 ``source_file`` 边关联的端点节点（head/tail），携带完整节点数据
-    （含 step 6 合成的兜底 description）。节点若无显式 source_file 属性（仅出现在
-    triples 无 Concept 的节点），则默认填入当前 path 以保证向量 id 前缀正确。
-    """
-    nodes: set[str] = set()
-    for u, v, data in graph.edges(data=True):
-        if data.get("source_file") == source_file:
-            nodes.add(u)
-            nodes.add(v)
-
-    sub = nx.MultiDiGraph()
-    for node in nodes:
-        if not graph.has_node(node):
-            continue
-        data = dict(graph.nodes[node])
-        data.setdefault("source_file", source_file)
-        sub.add_node(node, **data)
-    return sub
-
-
 def _dedup_converge(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """应用 §3.5.5 去重收敛规则，返回 ``{source_file: 最终态 record}``。
 

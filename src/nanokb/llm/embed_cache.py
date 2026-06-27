@@ -259,9 +259,17 @@ class EmbeddingCache:
         for orig_idx in miss_idx:
             results[orig_idx] = dedup_map[self._key(texts[orig_idx])]
 
-        # 至此 results 中所有 None 已被 dedup_map 回填；长度必与 texts 相等。
-        # 显式窄化为 list[list[float]] 供 mypy strict 通过。
-        return [r for r in results if r is not None]
+        # 不变式校验：所有位置必须已回填（cache 命中或 dedup_map 广播）。残留 None
+        # 说明上游逻辑被破坏——显式 raise 而非静默过滤（旧 [r for r in results if r
+        # is not None] 会丢项 + 缩短列表，虽被 index_nodes 长度校验兜住但掩盖根因）。
+        out: list[list[float]] = []
+        for i, r in enumerate(results):
+            if r is None:
+                raise RuntimeError(
+                    f"embed_batch invariant violated: position {i} unresolved after backfill"
+                )
+            out.append(r)
+        return out
 
 
 __all__ = ["EMBED_BATCH_SIZE", "EmbeddingCache"]

@@ -51,6 +51,7 @@ def _write_progress_file(
     heartbeat_age_sec: float = 0.0,
     completed: int = 0,
     indexed_nodes: int = 0,
+    seq: int = 0,
 ) -> None:
     """直接写一个可控的 BuildProgress JSON（供 check_liveliness / is_alive 夹具）。"""
     hb = datetime.now(timezone.utc) - timedelta(seconds=heartbeat_age_sec)
@@ -60,6 +61,7 @@ def _write_progress_file(
         stage=stage,
         started_at=hb.isoformat(),
         heartbeat_ts=hb.isoformat(),
+        seq=seq,
         extract=ExtractProgress(total=10, completed=completed, cached=0, skipped=0),
         vector=VectorProgress(total_nodes=10, indexed_nodes=indexed_nodes),
     )
@@ -322,17 +324,35 @@ def test_check_liveliness_stale_no_growth_returns_false(out_dir: Path) -> None:
 
 
 def test_check_liveliness_stale_but_growing_returns_true(out_dir: Path) -> None:
-    """AC3.7 / Medium #1：heartbeat 过期但计数增长 → 编译进行中（True）。"""
-    _write_progress_file(out_dir, stage=BuildStage.EXTRACT, heartbeat_age_sec=120.0, completed=3)
+    """AC3.7 / Medium #1：heartbeat 过期但业务有推进（seq 增长）→ 编译进行中（True）。"""
+    _write_progress_file(out_dir, stage=BuildStage.EXTRACT, heartbeat_age_sec=120.0, completed=3, seq=1)
 
-    # 模拟 build 仍在推进：recheck_sec 后把 completed 写到 4
+    # 模拟 build 仍在推进：recheck_sec 后把 completed + seq 写高（业务 flush 同时 bump seq）
     def _grow() -> None:
         time.sleep(0.1)
         _write_progress_file(
-            out_dir, stage=BuildStage.EXTRACT, heartbeat_age_sec=120.0, completed=4
+            out_dir, stage=BuildStage.EXTRACT, heartbeat_age_sec=120.0, completed=4, seq=2
         )
 
     threading.Thread(target=_grow, daemon=True).start()
+    assert check_liveliness(out_dir, recheck_sec=0.2) is True
+
+
+def test_check_liveliness_stale_but_stage_advanced_returns_true(out_dir: Path) -> None:
+    """阶段切换时计数不动但 seq bump → True（覆盖 GRAPH→VECTOR→INDEX 计数不动场景）。
+
+    旧实现只比 extract.completed / vector.indexed_nodes，阶段切换时两者都不动会误报
+    僵尸；seq 由 set_stage bump，故能正确识别主线程仍在推进。
+    """
+    # GRAPH 阶段，heartbeat 过期，extract/vector 计数均为 0
+    _write_progress_file(out_dir, stage=BuildStage.GRAPH, heartbeat_age_sec=120.0, completed=0, seq=1)
+
+    def _advance_stage() -> None:
+        time.sleep(0.1)
+        # 阶段切到 VECTOR，计数仍为 0，但 seq bump（set_stage 触发）
+        _write_progress_file(out_dir, stage=BuildStage.VECTOR, heartbeat_age_sec=120.0, completed=0, seq=2)
+
+    threading.Thread(target=_advance_stage, daemon=True).start()
     assert check_liveliness(out_dir, recheck_sec=0.2) is True
 
 

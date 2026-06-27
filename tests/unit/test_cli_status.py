@@ -67,6 +67,7 @@ def _write_progress(
     vector_total: int = 0,
     vector_indexed: int = 0,
     message: str = "",
+    seq: int = 0,
 ) -> None:
     """直接写一个可控的 .build_progress.json 夹具。"""
     now = datetime.now(timezone.utc)
@@ -79,6 +80,7 @@ def _write_progress(
         started_at=started.isoformat(),
         heartbeat_ts=hb.isoformat(),
         force=False,
+        seq=seq,
         extract=ExtractProgress(
             total=extract_total, completed=extract_completed, cached=extract_cached, skipped=0
         ),
@@ -365,9 +367,10 @@ def test_status_medium1_heartbeat_stale_but_growing(tmp_path: Path) -> None:
         heartbeat_age_sec=600.0,  # heartbeat 过期
         extract_total=10,
         extract_completed=3,
+        seq=1,
     )
 
-    # 后台线程：recheck 窗口内推进 completed → 4
+    # 后台线程：recheck 窗口内推进 completed → 4（业务 flush 同步 bump seq）
     def _grow() -> None:
         time.sleep(0.1)
         _write_progress(
@@ -376,6 +379,7 @@ def test_status_medium1_heartbeat_stale_but_growing(tmp_path: Path) -> None:
             heartbeat_age_sec=600.0,
             extract_total=10,
             extract_completed=4,
+            seq=2,
         )
 
     threading.Thread(target=_grow, daemon=True).start()
