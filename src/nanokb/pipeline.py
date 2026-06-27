@@ -515,14 +515,32 @@ def compile(  # noqa: A001  — 故意与内建同名，方案 §3.5.1 指定
             )
             # Feature s3-feat-004：预计算待索引节点总数（跨子图汇总）写入 vector.total_nodes，
             # 每子图索引后 update_vector(indexed_delta=...) 推进进度。
+            # 一次性构建 source_file → nodes 倒排（单次 O(E)），避免逐 path
+            # 全图遍历（旧 _subgraph_for_source 对每个 path 扫全图边，N paths × E
+            # 边 = 百亿次操作，是 vector 阶段长时间无输出的根因）。
+            source_to_nodes: dict[str, set[str]] = {}
+            for u, v, edata in graph.edges(data=True):
+                sf = edata.get("source_file")
+                if sf:
+                    source_to_nodes.setdefault(sf, set()).update((u, v))
+
             subgraphs_to_index: list[tuple[str, nx.MultiDiGraph]] = []
             for path in to_process:
                 if path not in results_map:
                     continue
-                subgraph = _subgraph_for_source(graph, path)
-                if subgraph.number_of_nodes() > 0:
-                    subgraphs_to_index.append((path, subgraph))
-                    total_vector_nodes += subgraph.number_of_nodes()
+                nodes = source_to_nodes.get(path)
+                if not nodes:
+                    continue
+                sub = nx.MultiDiGraph()
+                for node in nodes:
+                    if not graph.has_node(node):
+                        continue
+                    ndata = dict(graph.nodes[node])
+                    ndata.setdefault("source_file", path)
+                    sub.add_node(node, **ndata)
+                if sub.number_of_nodes() > 0:
+                    subgraphs_to_index.append((path, sub))
+                    total_vector_nodes += sub.number_of_nodes()
             writer.update_vector(total=total_vector_nodes, force_flush=True)
             for _path, subgraph in subgraphs_to_index:
                 vector_store.index_nodes(
