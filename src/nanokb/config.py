@@ -69,6 +69,15 @@ class Settings(BaseSettings):
     embedding_api_key: SecretStr | None = None  # openai 兼容 embedding 专用 key
     embedding_base_url: str | None = None  # openai 兼容 embedding 专用端点（如智谱 GLM）
 
+    # ── Embedding 缓存与并发（方案 §4.5 / §5.5，Feature s3-feat-001/003）──
+    # enable_embed_cache：embedding 内容寻址缓存总开关（默认开）。关闭时
+    # EmbeddingCache.get/put 为 no-op，但 embed_batch 仍提供 embed（cache 与并发
+    # 正交，Medium #4）。中断重跑时全命中 cache，零 embedding Token 成本。
+    enable_embed_cache: bool = True
+    # embed_concurrency：embedding batch 并发度（默认 4，保守起步）。
+    # 0/1 = 串行分支（阶段一 feat-001 基线，零回归）；>1 = 并发分支（阶段二 feat-003）。
+    embed_concurrency: int = 4
+
     # ── 图谱 ────────────────────────────────────────────────────────
     graph_serialization: Literal["json", "graphml"] = "json"
     extractor_version: str = "1"

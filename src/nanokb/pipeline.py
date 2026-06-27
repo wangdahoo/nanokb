@@ -59,6 +59,7 @@ from nanokb.extract.cache import ExtractionCache
 from nanokb.index import VectorStore, build_indexes
 from nanokb.index.community import CommunityResult, load_communities
 from nanokb.llm.base import EmbeddingClient, LLMClient, make_embedding_client, make_llm_client
+from nanokb.llm.embed_cache import EmbeddingCache
 from nanokb.load.detector import (
     SUPPORTED_SUFFIXES,
     ChangeSet,
@@ -163,17 +164,30 @@ class VectorStoreBackend(Protocol):
     s1-feat-011 的 ``VectorStore`` 实现将满足此协议。当前 stage4 尚未实现，
     ``compile(vector_store=None)`` 时向量操作被跳过（仅影响 ChromaDB 一致性，
     graph/triples.jsonl/manifest 主线不受影响）。
+
+    round 3（Opt#4）：``index_nodes`` 新增可选关键字参数 ``embed_fn`` / ``on_progress``，
+    默认 None 时走原 ``llm.embed`` 路径（零回归），保证测试 mock VectorStore 仍兼容。
     """
 
     def delete_by_source(self, source_file: str) -> None:
         """删除 ``source_file`` 的全部向量（where={"source_file":source_file}）。"""
         ...
 
-    def index_nodes(self, graph: nx.MultiDiGraph, llm: EmbeddingClient) -> None:
+    def index_nodes(
+        self,
+        graph: nx.MultiDiGraph,
+        llm: EmbeddingClient,
+        *,
+        embed_fn: Callable[[list[str]], list[list[float]]] | None = None,
+        on_progress: Callable[[int, int], None] | None = None,
+    ) -> None:
         """为图中每个节点的 description 生成 embedding 并 upsert。
 
         v4 Medium #1：调用前须确保 fallback 描述已合成（pipeline 保证
         synthesize_fallback_descriptions 先于 index_nodes 执行）。
+
+        round 3 Opt#4：``embed_fn`` 提供时一次性接收全部 description 文本，
+        通常为 ``EmbeddingCache.embed_batch``；为 None 时走 ``llm.embed``。
         """
         ...
 
@@ -454,18 +468,29 @@ def compile(  # noqa: A001  — 故意与内建同名，方案 §3.5.1 指定
     fallback_count = graph_builder.synthesize_fallback_descriptions()
 
     # step 7: 向量索引（v4 新增独立步骤）——逐 path 子图，描述已就绪
+    # round 2 Severe #1 + round 3 Opt#4：构造 EmbeddingCache（cache 与并发正交，
+    # Medium #4——enable_embed_cache=False 时仍构造，get/put 为 no-op，embed_batch
+    # 仍提供串行/并发 embed），把 cache.embed_batch 作为 embed_fn 注入 index_nodes。
     if vector_store is not None:
         logger.info(
             "indexing vectors (embedding model: %s)...",
             settings.embedding_model,
             extra={"stage": "compile-vector"},
         )
+        embed_cache = EmbeddingCache(
+            out_dir / "embed_cache",
+            embedding_model=settings.embedding_model,
+            embedding_dim=actual_embedding_dim,
+            embedder=embedder,
+            embed_concurrency=settings.embed_concurrency,
+            enable_cache=settings.enable_embed_cache,
+        )
         for path in to_process:
             if path not in results_map:
                 continue
             subgraph = _subgraph_for_source(graph, path)
             if subgraph.number_of_nodes() > 0:
-                vector_store.index_nodes(subgraph, embedder)
+                vector_store.index_nodes(subgraph, embedder, embed_fn=embed_cache.embed_batch)
 
     # step 8: build_indexes（community + keyword）——s1-feat-011
     # 由 _finalize_staging 内部调用 build_indexes 写入 staging 目录。

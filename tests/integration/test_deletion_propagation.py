@@ -54,7 +54,14 @@ class FakeVectorStore:
     def delete_by_source(self, source_file: str) -> None:
         self.deleted_sources.append(source_file)
 
-    def index_nodes(self, graph: nx.MultiDiGraph, llm: object) -> None:
+    def index_nodes(
+        self,
+        graph: nx.MultiDiGraph,
+        llm: object,
+        *,
+        embed_fn: object = None,
+        on_progress: object = None,
+    ) -> None:
         for node, data in graph.nodes(data=True):
             sf = str(data.get("source_file", "unknown"))
             self.indexed_node_ids.append(f"{sf}::{node}")
