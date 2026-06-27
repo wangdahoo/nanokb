@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,12 @@ def atomic_write_text(path: str | Path, data: str, *, encoding: str = "utf-8") -
     临时文件位于目标文件同目录，保证 ``os.replace`` 在同一文件系统（rename 原子）。
     若目标文件存在则被原子替换；写入过程中异常时临时文件被清理，目标文件保持旧内容，
     不会出现半写状态。
+
+    Feature s3-feat-004：``os.replace`` 在 Windows 上若另一进程/线程正打开目标文件
+    （典型场景：build 写 ``.build_progress.json`` 时 status 读）会抛 ``PermissionError``
+    共享冲突。这是瞬时的——读侧很快释放句柄。此处对 ``PermissionError`` 重试若干次，
+    使跨进程 build-write / status-read 在 Windows 上不互相打断（对其它平台无副作用，
+    它们极少抛该错误）。
     """
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -47,7 +54,7 @@ def atomic_write_text(path: str | Path, data: str, *, encoding: str = "utf-8") -
             f.write(data)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp_name, target)
+        _replace_with_retry(tmp_name, target)
     except BaseException:
         # 任何异常（含 KeyboardInterrupt）都清理临时文件，保持目标文件旧内容
         try:
@@ -55,6 +62,24 @@ def atomic_write_text(path: str | Path, data: str, *, encoding: str = "utf-8") -
         except FileNotFoundError:
             pass
         raise
+
+
+def _replace_with_retry(src: str, target: Path, *, retries: int = 10, delay: float = 0.005) -> None:
+    """``os.replace`` + Windows 共享冲突重试。
+
+    仅 ``PermissionError``（WinError 5 / 32 等）视为瞬时共享冲突重试；其它异常立即上抛。
+    总等待上限 ``retries * delay``（默认 50ms），覆盖典型读侧持句柄窗口。
+    """
+    last_exc: Exception | None = None
+    for _ in range(max(1, retries)):
+        try:
+            os.replace(src, target)
+            return
+        except PermissionError as exc:
+            last_exc = exc
+            time.sleep(delay)
+    assert last_exc is not None
+    raise last_exc
 
 
 def atomic_write_json(

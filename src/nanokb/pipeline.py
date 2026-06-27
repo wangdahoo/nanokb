@@ -100,6 +100,7 @@ from nanokb.qa.review import (
     determine_reason,
 )
 from nanokb.utils.io import atomic_write_json, staging_swap
+from nanokb.utils.progress import BuildProgressWriter, BuildStage
 
 logger = logging.getLogger("nanokb")
 
@@ -239,313 +240,359 @@ def compile(  # noqa: A001  — 故意与内建同名，方案 §3.5.1 指定
 
     graph_builder = GraphBuilder(graph, settings)
 
-    # ── 阶段 A：抽取（失败安全，不触碰 graph/chroma/triples.jsonl 写） ──
-    changes = detect_changes(raw_dir, manifest, settings)
+    # ── 运行时进度文件（Feature s3-feat-004）──────────────────────────
+    # 跨进程可见：build 周期性原子写 out/.build_progress.json，status 只读。
+    # enabled=settings.enable_build_progress（默认 True）；False 时 writer 全方法
+    # no-op、不起 heartbeat 线程（零回归）。except 在 compile 内部覆盖
+    # KeyboardInterrupt / Exception（os._exit 兼容，不依赖 finally/atexit）。
+    writer = BuildProgressWriter(out_dir, force, enabled=settings.enable_build_progress)
 
-    if not force and not changes.has_changes:
-        logger.info("no changes detected; skipping compilation")
-        return CompileResult(changes=changes)
+    try:
+        # ── 阶段 A：抽取（失败安全，不触碰 graph/chroma/triples.jsonl 写） ──
+        writer.set_stage(BuildStage.DETECT)
+        changes = detect_changes(raw_dir, manifest, settings)
 
-    to_process_preview = sorted(set(changes.added) | set(changes.modified))
-    logger.info(
-        "changes detected: %d added, %d modified, %d deleted — %d file(s) to extract",
-        len(changes.added),
-        len(changes.modified),
-        len(changes.deleted),
-        len(to_process_preview),
-        extra={"stage": "compile-detect"},
-    )
+        if not force and not changes.has_changes:
+            logger.info("no changes detected; skipping compilation")
+            writer.done()
+            return CompileResult(changes=changes)
 
-    if llm is None:
-        llm = make_llm_client(settings)
-
-    # 生文与向量解耦：embedder 可独立于 chat llm（生文 DeepSeek + embedding GLM/ollama）。
-    # _resolve_embedder 在未配置独立 embedding 端点时复用 llm（向后兼容）。
-    embedder = _resolve_embedder(settings, embedding_client, llm)
-
-    logger.info("probing embedding dimensions...", extra={"stage": "compile-probe"})
-    # s1-feat-011: 向量库后端。vector_store=None 时自动构造真实 ChromaDB VectorStore，
-    # 使 CLI build 端到端产出向量。探测 embedding 维度保证 VectorStore 元数据与 embedder.embed
-    # 实际输出维度一致（Medium #7 维度校验依赖此一致性）。
-    actual_embedding_dim = _probe_embedding_dim(embedder)
-    if vector_store is None:
-        vector_store = VectorStore(
-            settings.out_dir / "chroma",
-            settings.embedding_model,
-            actual_embedding_dim,
+        to_process_preview = sorted(set(changes.added) | set(changes.modified))
+        logger.info(
+            "changes detected: %d added, %d modified, %d deleted — %d file(s) to extract",
+            len(changes.added),
+            len(changes.modified),
+            len(changes.deleted),
+            len(to_process_preview),
+            extra={"stage": "compile-detect"},
         )
 
-    extractor: Extractor
-    if extractor_factory is not None:
-        extractor = extractor_factory(llm, settings)
-    else:
-        # 默认按扩展名分发：代码文件（.py/.js/.java）走 CodeTrack（零 Token），
-        # 其余走 SemanticTrack（LLM 抽取）。s1-feat-010。
-        extractor = build_default_extractor(llm, settings)
+        if llm is None:
+            llm = make_llm_client(settings)
 
-    results_map: dict[str, ExtractionResult] = {}
-    sha_map: dict[str, str] = {}
-    skipped: list[str] = []
+        # 生文与向量解耦：embedder 可独立于 chat llm（生文 DeepSeek + embedding GLM/ollama）。
+        # _resolve_embedder 在未配置独立 embedding 端点时复用 llm（向后兼容）。
+        embedder = _resolve_embedder(settings, embedding_client, llm)
 
-    cache = ExtractionCache(settings.out_dir / "extract_cache")
-    extraction_sig = extraction_config_signature(settings)
-    cached_count = 0
-
-    to_process = sorted(set(changes.added) | set(changes.modified))
-
-    def _process_one_file(
-        path: str,
-    ) -> tuple[str, ExtractionResult | None, str | None, bool, bool]:
-        """单文件处理：ingest → cache.get → extract → cache.put（方案 §3.4，Feature s1-feat-004）。
-
-        返回 ``(path, result_or_None, sha256_or_None, is_skipped, was_cached)``。
-        线程安全：``ingest_file`` / ``cache`` 无共享状态；``extractor`` 共享单例
-        （``DefaultExtractor`` DCL + ``SemanticTrack`` 无状态），可跨文档并发调用。
-        worker 只返回不可变元组，``results_map``/``sha_map``/``skipped``/``cached_count``
-        由主线程在归并时写（无锁、无竞态）。
-        """
-        abs_path = raw_dir / path
-        logger.info("ingesting %s ...", path, extra={"stage": "compile-ingest", "file": path})
-        try:
-            doc = ingest_file(abs_path, raw_dir, registry, settings)
-        except UnsupportedFormatError as exc:
-            logger.warning(
-                "skip unsupported file: %s (%s)",
-                path,
-                exc,
-                extra={"stage": "compile-ingest", "file": path},
+        logger.info("probing embedding dimensions...", extra={"stage": "compile-probe"})
+        # s1-feat-011: 向量库后端。vector_store=None 时自动构造真实 ChromaDB VectorStore，
+        # 使 CLI build 端到端产出向量。探测 embedding 维度保证 VectorStore 元数据与 embedder.embed
+        # 实际输出维度一致（Medium #7 维度校验依赖此一致性）。
+        actual_embedding_dim = _probe_embedding_dim(embedder)
+        if vector_store is None:
+            vector_store = VectorStore(
+                settings.out_dir / "chroma",
+                settings.embedding_model,
+                actual_embedding_dim,
             )
-            return (path, None, None, True, False)
-        except Exception:
-            logger.exception(
-                "ingest failed for %s",
-                path,
-                extra={"stage": "compile-ingest", "file": path},
-            )
-            return (path, None, None, True, False)
 
-        cached = cache.get(doc.sha256, extraction_sig, settings.llm_model)
-        if cached is not None:
+        extractor: Extractor
+        if extractor_factory is not None:
+            extractor = extractor_factory(llm, settings)
+        else:
+            # 默认按扩展名分发：代码文件（.py/.js/.java）走 CodeTrack（零 Token），
+            # 其余走 SemanticTrack（LLM 抽取）。s1-feat-010。
+            extractor = build_default_extractor(llm, settings)
+
+        results_map: dict[str, ExtractionResult] = {}
+        sha_map: dict[str, str] = {}
+        skipped: list[str] = []
+
+        cache = ExtractionCache(settings.out_dir / "extract_cache")
+        extraction_sig = extraction_config_signature(settings)
+        cached_count = 0
+
+        to_process = sorted(set(changes.added) | set(changes.modified))
+
+        def _process_one_file(
+            path: str,
+        ) -> tuple[str, ExtractionResult | None, str | None, bool, bool]:
+            """单文件处理：ingest → cache.get → extract → cache.put（方案 §3.4，Feature s1-feat-004）。
+
+            返回 ``(path, result_or_None, sha256_or_None, is_skipped, was_cached)``。
+            线程安全：``ingest_file`` / ``cache`` 无共享状态；``extractor`` 共享单例
+            （``DefaultExtractor`` DCL + ``SemanticTrack`` 无状态），可跨文档并发调用。
+            worker 只返回不可变元组，``results_map``/``sha_map``/``skipped``/``cached_count``
+            由主线程在归并时写（无锁、无竞态）。
+            """
+            abs_path = raw_dir / path
+            logger.info("ingesting %s ...", path, extra={"stage": "compile-ingest", "file": path})
+            try:
+                doc = ingest_file(abs_path, raw_dir, registry, settings)
+            except UnsupportedFormatError as exc:
+                logger.warning(
+                    "skip unsupported file: %s (%s)",
+                    path,
+                    exc,
+                    extra={"stage": "compile-ingest", "file": path},
+                )
+                return (path, None, None, True, False)
+            except Exception:
+                logger.exception(
+                    "ingest failed for %s",
+                    path,
+                    extra={"stage": "compile-ingest", "file": path},
+                )
+                return (path, None, None, True, False)
+
+            cached = cache.get(doc.sha256, extraction_sig, settings.llm_model)
+            if cached is not None:
+                logger.info(
+                    "cache hit %s → %d triples, %d concepts",
+                    path,
+                    len(cached.triples),
+                    len(cached.concepts),
+                    extra={"stage": "compile-extract", "file": path},
+                )
+                return (path, _normalize_result_source(cached, path), doc.sha256, False, True)
+
+            try:
+                result = extractor.extract(doc)
+            except Exception:
+                logger.exception(
+                    "extraction failed for %s",
+                    path,
+                    extra={"stage": "compile-extract", "file": path},
+                )
+                return (path, None, None, True, False)
+
+            try:
+                cache.put(doc.sha256, extraction_sig, settings.llm_model, result)
+            except Exception:
+                logger.warning(
+                    "cache put failed for %s; result kept in memory",
+                    path,
+                    extra={"stage": "compile-extract", "file": path},
+                )
+
             logger.info(
-                "cache hit %s → %d triples, %d concepts",
+                "extracted %s → %d triples, %d concepts",
                 path,
-                len(cached.triples),
-                len(cached.concepts),
+                len(result.triples),
+                len(result.concepts),
                 extra={"stage": "compile-extract", "file": path},
             )
-            return (path, _normalize_result_source(cached, path), doc.sha256, False, True)
+            return (path, _normalize_result_source(result, path), doc.sha256, False, False)
 
-        try:
-            result = extractor.extract(doc)
-        except Exception:
-            logger.exception(
-                "extraction failed for %s",
-                path,
-                extra={"stage": "compile-extract", "file": path},
+        def _merge_outcome(
+            path: str,
+            result: ExtractionResult | None,
+            sha: str | None,
+            is_skipped: bool,
+            was_cached: bool,
+        ) -> None:
+            """主线程归并单个文件结果到 results_map/sha_map/skipped/cached_count。
+
+            Feature s3-feat-004：同步推进 BuildProgressWriter.extract 计数（completed /
+            cached / skipped delta），使 status 跨进程可见抽取进度。``_merge_outcome``
+            始终在主线程执行（串行循环或 ``as_completed`` 归并），writer 内部自带锁。
+            """
+            nonlocal cached_count
+            if is_skipped:
+                skipped.append(path)
+                writer.update_extract(skipped_delta=1)
+                return
+            assert result is not None and sha is not None
+            results_map[path] = result
+            sha_map[path] = sha
+            if was_cached:
+                cached_count += 1
+            writer.update_extract(
+                completed_delta=1,
+                cached_delta=1 if was_cached else 0,
             )
-            return (path, None, None, True, False)
 
-        try:
-            cache.put(doc.sha256, extraction_sig, settings.llm_model, result)
-        except Exception:
-            logger.warning(
-                "cache put failed for %s; result kept in memory",
-                path,
-                extra={"stage": "compile-extract", "file": path},
+        # ── 阶段 A：抽取（可配置文档级并发；失败安全——任一文件失败仅记日志标 skip） ──
+        # concurrency<=1 串行回退（默认，零回归）；>1 用 ThreadPoolExecutor 并发，
+        # 主线程 as_completed 归并。阶段 B 在 with 块退出（全部 join）后才执行。
+        writer.set_stage(BuildStage.EXTRACT)
+        writer.update_extract(total=len(to_process), force_flush=True)
+        doc_concurrency = max(1, settings.extract_doc_concurrency)
+        if doc_concurrency == 1:
+            for path in to_process:
+                _merge_outcome(*_process_one_file(path))
+        else:
+            pool = concurrent.futures.ThreadPoolExecutor(max_workers=doc_concurrency)
+            futures = {pool.submit(_process_one_file, path): path for path in to_process}
+            try:
+                for future in concurrent.futures.as_completed(futures):
+                    path = futures[future]
+                    try:
+                        outcome = future.result()
+                    except Exception:
+                        # 兜底：_process_one_file 内部异常未捕获时的最终隔离
+                        logger.exception(
+                            "unexpected failure processing %s",
+                            path,
+                            extra={"stage": "compile-extract", "file": path},
+                        )
+                        skipped.append(path)
+                        continue
+                    _merge_outcome(*outcome)
+                pool.shutdown(wait=True)
+            except KeyboardInterrupt:
+                # Ctrl-C：取消排队任务、不阻塞等待在途 worker（与 semantic_track 一致）；
+                # 失败安全——阶段 A 抽取不触碰 graph/triples/vector 写入。
+                pool.shutdown(wait=False, cancel_futures=True)
+                raise
+
+        # ── 阶段 B：破坏性变更（抽取全部成功后统一执行） ──────────────────
+        writer.set_stage(BuildStage.GRAPH)
+
+        # step 3: deletion 级联（Severe #1）
+        for path in changes.deleted:
+            graph_builder.delete_by_source(path)
+            if vector_store is not None:
+                vector_store.delete_by_source(path)
+            _append_triples_log(
+                out_dir,
+                {
+                    "schema_version": manifest.version,
+                    "op": "delete",
+                    "source_file": path,
+                    "ts": _now_iso(),
+                },
             )
+            manifest.files.pop(path, None)
 
+        # step 4: modified 先清后建（Medium #2）——在 upsert 之前清旧边/旧向量
+        for path in changes.modified:
+            if path not in results_map:
+                continue
+            graph_builder.delete_by_source(path)
+            if vector_store is not None:
+                vector_store.delete_by_source(path)
+
+        # step 5: added/modified 图构建（无向量，v4 拆分独立小阶段）
         logger.info(
-            "extracted %s → %d triples, %d concepts",
-            path,
-            len(result.triples),
-            len(result.concepts),
-            extra={"stage": "compile-extract", "file": path},
-        )
-        return (path, _normalize_result_source(result, path), doc.sha256, False, False)
-
-    def _merge_outcome(
-        path: str,
-        result: ExtractionResult | None,
-        sha: str | None,
-        is_skipped: bool,
-        was_cached: bool,
-    ) -> None:
-        """主线程归并单个文件结果到 results_map/sha_map/skipped/cached_count。"""
-        nonlocal cached_count
-        if is_skipped:
-            skipped.append(path)
-            return
-        assert result is not None and sha is not None
-        results_map[path] = result
-        sha_map[path] = sha
-        if was_cached:
-            cached_count += 1
-
-    # ── 阶段 A：抽取（可配置文档级并发；失败安全——任一文件失败仅记日志标 skip） ──
-    # concurrency<=1 串行回退（默认，零回归）；>1 用 ThreadPoolExecutor 并发，
-    # 主线程 as_completed 归并。阶段 B 在 with 块退出（全部 join）后才执行。
-    doc_concurrency = max(1, settings.extract_doc_concurrency)
-    if doc_concurrency == 1:
-        for path in to_process:
-            _merge_outcome(*_process_one_file(path))
-    else:
-        pool = concurrent.futures.ThreadPoolExecutor(max_workers=doc_concurrency)
-        futures = {pool.submit(_process_one_file, path): path for path in to_process}
-        try:
-            for future in concurrent.futures.as_completed(futures):
-                path = futures[future]
-                try:
-                    outcome = future.result()
-                except Exception:
-                    # 兜底：_process_one_file 内部异常未捕获时的最终隔离
-                    logger.exception(
-                        "unexpected failure processing %s",
-                        path,
-                        extra={"stage": "compile-extract", "file": path},
-                    )
-                    skipped.append(path)
-                    continue
-                _merge_outcome(*outcome)
-            pool.shutdown(wait=True)
-        except KeyboardInterrupt:
-            # Ctrl-C：取消排队任务、不阻塞等待在途 worker（与 semantic_track 一致）；
-            # 失败安全——阶段 A 抽取不触碰 graph/triples/vector 写入。
-            pool.shutdown(wait=False, cancel_futures=True)
-            raise
-
-    # ── 阶段 B：破坏性变更（抽取全部成功后统一执行） ──────────────────
-
-    # step 3: deletion 级联（Severe #1）
-    for path in changes.deleted:
-        graph_builder.delete_by_source(path)
-        if vector_store is not None:
-            vector_store.delete_by_source(path)
-        _append_triples_log(
-            out_dir,
-            {
-                "schema_version": manifest.version,
-                "op": "delete",
-                "source_file": path,
-                "ts": _now_iso(),
-            },
-        )
-        manifest.files.pop(path, None)
-
-    # step 4: modified 先清后建（Medium #2）——在 upsert 之前清旧边/旧向量
-    for path in changes.modified:
-        if path not in results_map:
-            continue
-        graph_builder.delete_by_source(path)
-        if vector_store is not None:
-            vector_store.delete_by_source(path)
-
-    # step 5: added/modified 图构建（无向量，v4 拆分独立小阶段）
-    logger.info(
-        "building graph from %d file(s)...",
-        len(results_map),
-        extra={"stage": "compile-graph"},
-    )
-    for path in to_process:
-        if path not in results_map:
-            continue
-        result = results_map[path]
-        _append_triples_log(
-            out_dir,
-            {
-                "schema_version": manifest.version,
-                "op": "upsert",
-                "source_file": path,
-                "triples": [t.model_dump(mode="json") for t in result.triples],
-                "concepts": [c.model_dump(mode="json") for c in result.concepts],
-                "ts": _now_iso(),
-            },
-        )
-        graph_builder.upsert(result, path)
-
-    # step 6: synthesize_fallback_descriptions（Opt #2 v3 + v4 Medium #1）
-    # 必须在 step 7（index_nodes）之前——漏抽 Concept 的节点经此合成后才有描述，
-    # 否则 index_nodes 会因空描述跳过这些节点。
-    fallback_count = graph_builder.synthesize_fallback_descriptions()
-
-    # step 7: 向量索引（v4 新增独立步骤）——逐 path 子图，描述已就绪
-    # round 2 Severe #1 + round 3 Opt#4：构造 EmbeddingCache（cache 与并发正交，
-    # Medium #4——enable_embed_cache=False 时仍构造，get/put 为 no-op，embed_batch
-    # 仍提供串行/并发 embed），把 cache.embed_batch 作为 embed_fn 注入 index_nodes。
-    if vector_store is not None:
-        logger.info(
-            "indexing vectors (embedding model: %s)...",
-            settings.embedding_model,
-            extra={"stage": "compile-vector"},
-        )
-        embed_cache = EmbeddingCache(
-            out_dir / "embed_cache",
-            embedding_model=settings.embedding_model,
-            embedding_dim=actual_embedding_dim,
-            embedder=embedder,
-            embed_concurrency=settings.embed_concurrency,
-            enable_cache=settings.enable_embed_cache,
+            "building graph from %d file(s)...",
+            len(results_map),
+            extra={"stage": "compile-graph"},
         )
         for path in to_process:
             if path not in results_map:
                 continue
-            subgraph = _subgraph_for_source(graph, path)
-            if subgraph.number_of_nodes() > 0:
-                vector_store.index_nodes(subgraph, embedder, embed_fn=embed_cache.embed_batch)
+            result = results_map[path]
+            _append_triples_log(
+                out_dir,
+                {
+                    "schema_version": manifest.version,
+                    "op": "upsert",
+                    "source_file": path,
+                    "triples": [t.model_dump(mode="json") for t in result.triples],
+                    "concepts": [c.model_dump(mode="json") for c in result.concepts],
+                    "ts": _now_iso(),
+                },
+            )
+            graph_builder.upsert(result, path)
 
-    # step 8: build_indexes（community + keyword）——s1-feat-011
-    # 由 _finalize_staging 内部调用 build_indexes 写入 staging 目录。
+        # step 6: synthesize_fallback_descriptions（Opt #2 v3 + v4 Medium #1）
+        # 必须在 step 7（index_nodes）之前——漏抽 Concept 的节点经此合成后才有描述，
+        # 否则 index_nodes 会因空描述跳过这些节点。
+        fallback_count = graph_builder.synthesize_fallback_descriptions()
 
-    # step 9: manifest 更新（仅 results_map 中成功抽取的 path，Opt #2 v4）
-    now = _now_iso()
-    for path in sorted(results_map):
-        manifest.files[path] = FileState(
-            path=path,
-            sha256=sha_map.get(path, ""),
-            processed_at=now,
-            extractor_version=settings.extractor_version,
-            llm_model=settings.llm_model,
-            embedding_model=settings.embedding_model,
-            embedding_dim=actual_embedding_dim,
-            extraction_config=extraction_config_signature(settings),
-            index_config=index_config_signature(settings),
-            embedding_config=embedding_config_signature(settings),
+        # step 7: 向量索引（v4 新增独立步骤）——逐 path 子图，描述已就绪
+        # round 2 Severe #1 + round 3 Opt#4：构造 EmbeddingCache（cache 与并发正交，
+        # Medium #4——enable_embed_cache=False 时仍构造，get/put 为 no-op，embed_batch
+        # 仍提供串行/并发 embed），把 cache.embed_batch 作为 embed_fn 注入 index_nodes。
+        if vector_store is not None:
+            writer.set_stage(BuildStage.VECTOR)
+            logger.info(
+                "indexing vectors (embedding model: %s)...",
+                settings.embedding_model,
+                extra={"stage": "compile-vector"},
+            )
+            embed_cache = EmbeddingCache(
+                out_dir / "embed_cache",
+                embedding_model=settings.embedding_model,
+                embedding_dim=actual_embedding_dim,
+                embedder=embedder,
+                embed_concurrency=settings.embed_concurrency,
+                enable_cache=settings.enable_embed_cache,
+            )
+            # Feature s3-feat-004：预计算待索引节点总数（跨子图汇总）写入 vector.total_nodes，
+            # 每子图索引后 update_vector(indexed_delta=...) 推进进度。
+            subgraphs_to_index: list[tuple[str, nx.MultiDiGraph]] = []
+            total_vector_nodes = 0
+            for path in to_process:
+                if path not in results_map:
+                    continue
+                subgraph = _subgraph_for_source(graph, path)
+                if subgraph.number_of_nodes() > 0:
+                    subgraphs_to_index.append((path, subgraph))
+                    total_vector_nodes += subgraph.number_of_nodes()
+            writer.update_vector(total=total_vector_nodes, force_flush=True)
+            for _path, subgraph in subgraphs_to_index:
+                vector_store.index_nodes(
+                    subgraph, embedder, embed_fn=embed_cache.embed_batch
+                )
+                writer.update_vector(indexed_delta=subgraph.number_of_nodes())
+
+        # step 8: build_indexes（community + keyword）——s1-feat-011
+        # 由 _finalize_staging 内部调用 build_indexes 写入 staging 目录。
+        writer.set_stage(BuildStage.INDEX)
+
+        # step 9: manifest 更新（仅 results_map 中成功抽取的 path，Opt #2 v4）
+        now = _now_iso()
+        for path in sorted(results_map):
+            manifest.files[path] = FileState(
+                path=path,
+                sha256=sha_map.get(path, ""),
+                processed_at=now,
+                extractor_version=settings.extractor_version,
+                llm_model=settings.llm_model,
+                embedding_model=settings.embedding_model,
+                embedding_dim=actual_embedding_dim,
+                extraction_config=extraction_config_signature(settings),
+                index_config=index_config_signature(settings),
+                embedding_config=embedding_config_signature(settings),
+            )
+
+        # step 10-11: 序列化到 staging + 原子切换（manifest 最后写）
+        logger.info(
+            "building community + keyword indexes, writing to disk...",
+            extra={"stage": "compile-finalize"},
+        )
+        # llm=None: 社区摘要用启发式（成员名拼接，零 Token），避免给已有 LLM 调用计数
+        # 断言的集成测试引入额外 complete 调用。社区 LLM 摘要可经 detect_communities
+        # 直接调用时启用（llm 非 None），或后续 feature 增设开关接入。
+        _finalize_staging(
+            graph_builder,
+            manifest,
+            out_dir,
+            graph=graph,
+            settings=settings,
+            llm=None,
         )
 
-    # step 10-11: 序列化到 staging + 原子切换（manifest 最后写）
-    logger.info(
-        "building community + keyword indexes, writing to disk...",
-        extra={"stage": "compile-finalize"},
-    )
-    # llm=None: 社区摘要用启发式（成员名拼接，零 Token），避免给已有 LLM 调用计数
-    # 断言的集成测试引入额外 complete 调用。社区 LLM 摘要可经 detect_communities
-    # 直接调用时启用（llm 非 None），或后续 feature 增设开关接入。
-    _finalize_staging(
-        graph_builder,
-        manifest,
-        out_dir,
-        graph=graph,
-        settings=settings,
-        llm=None,
-    )
+        writer.set_stage(BuildStage.FINALIZE)
+        logger.info(
+            "compile done: added=%d modified=%d deleted=%d extracted=%d skipped=%d fallback=%d",
+            len(changes.added),
+            len(changes.modified),
+            len(changes.deleted),
+            len(results_map),
+            len(skipped),
+            fallback_count,
+            extra={"stage": "compile"},
+        )
 
-    logger.info(
-        "compile done: added=%d modified=%d deleted=%d extracted=%d skipped=%d fallback=%d",
-        len(changes.added),
-        len(changes.modified),
-        len(changes.deleted),
-        len(results_map),
-        len(skipped),
-        fallback_count,
-        extra={"stage": "compile"},
-    )
-
-    return CompileResult(
-        changes=changes,
-        extracted_count=len(results_map),
-        skipped=skipped,
-        synthesized_fallback_count=fallback_count,
-        cached_count=cached_count,
-    )
+        writer.done()
+        return CompileResult(
+            changes=changes,
+            extracted_count=len(results_map),
+            skipped=skipped,
+            synthesized_fallback_count=fallback_count,
+            cached_count=cached_count,
+        )
+    except KeyboardInterrupt:
+        # os._exit(130) 兼容：interrupted() 在异常上抛到 cli.build 之前执行，
+        # 写 INTERRUPTED 保留文件供 status 展示「上次编译中断」（AC3.3）。
+        writer.interrupted()
+        raise
+    except Exception:
+        writer.interrupted()
+        raise
 
 
 # ── 重放 ──────────────────────────────────────────────────────────────

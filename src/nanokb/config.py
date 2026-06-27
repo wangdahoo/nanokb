@@ -78,6 +78,16 @@ class Settings(BaseSettings):
     # 0/1 = 串行分支（阶段一 feat-001 基线，零回归）；>1 = 并发分支（阶段二 feat-003）。
     embed_concurrency: int = 4
 
+    # ── 运行时进度文件（方案 §6.6，Feature s3-feat-004）──────────────
+    # enable_build_progress：编译期间写 out/.build_progress.json 供跨进程 status 只读
+    # （默认开）。关闭时 BuildProgressWriter 全方法 no-op、不起 heartbeat 线程（零回归）。
+    # status 绝不打开 chroma（保守假设规避跨进程锁，Medium #3）。
+    enable_build_progress: bool = True
+    # progress_liveliness_recheck_sec：check_liveliness 在 heartbeat 过期时二次采样等待
+    # 秒数（round 3 Opt#3，默认 1.0）。调小缩短「heartbeat 过期后等待二次采样」窗口，
+    # 不影响 heartbeat 主判据（10s 间隔）。
+    progress_liveliness_recheck_sec: float = 1.0
+
     # ── 图谱 ────────────────────────────────────────────────────────
     graph_serialization: Literal["json", "graphml"] = "json"
     extractor_version: str = "1"
