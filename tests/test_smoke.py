@@ -68,6 +68,10 @@ def test_all_models_are_importable() -> None:
     manifest = Manifest()
     assert manifest.version == "2"
     assert manifest.files == {}
+    assert manifest.total_vectors == 0
+    assert manifest.last_compiled_at == ""
+    assert manifest.last_llm_model == ""
+    assert manifest.last_embedding_model == ""
 
     hit = RetrievalHit(source="graph", score=0.9)
     assert hit.triple is None

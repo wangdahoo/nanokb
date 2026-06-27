@@ -14,19 +14,31 @@ import os
 import time
 from collections.abc import Iterable, Iterator
 from contextlib import AbstractContextManager, contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 import typer
-from rich.console import Console
+from rich.console import Console, Group
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
 
 from nanokb import pipeline
 from nanokb.config import Settings
 from nanokb.llm.base import make_llm_client
 from nanokb.load.detector import start_watch
 from nanokb.logging_setup import setup_logging
-from nanokb.models import RetrievalHit
+from nanokb.models import Manifest, RetrievalHit
 from nanokb.qa.progress import _SOURCE_LABELS
 from nanokb.qa.review import ReviewQueue
+from nanokb.utils.progress import (
+    PROGRESS_LIVENESS_RECHECK_SEC,
+    BuildProgress,
+    BuildStage,
+    check_liveliness,
+    is_alive,
+    read_progress,
+)
 
 app = typer.Typer(
     name="nanokb",
@@ -80,6 +92,346 @@ def _print_compile_summary(result: pipeline.CompileResult) -> None:
     if result.synthesized_fallback_count:
         parts.append(f"fallback={result.synthesized_fallback_count}")
     console.print(f"[green]编译完成：{', '.join(parts)}[/green]")
+
+
+# ── status 命令渲染辅助（Feature s3-feat-005）─────────────────────────
+
+
+#: status 渲染的阶段顺序（与 BuildStage 枚举对齐，排除终态 DONE/INTERRUPTED）。
+_STAGE_ORDER: tuple[BuildStage, ...] = (
+    BuildStage.DETECT,
+    BuildStage.EXTRACT,
+    BuildStage.GRAPH,
+    BuildStage.VECTOR,
+    BuildStage.INDEX,
+    BuildStage.FINALIZE,
+)
+
+#: 各阶段的中文标签（status 表格 / 纯文本共用）。
+_STAGE_LABELS: dict[BuildStage, str] = {
+    BuildStage.DETECT: "detect (变更检测)",
+    BuildStage.EXTRACT: "extract (抽取)",
+    BuildStage.GRAPH: "graph (图谱构建)",
+    BuildStage.VECTOR: "vector (向量索引)",
+    BuildStage.INDEX: "index (社区/关键词索引)",
+    BuildStage.FINALIZE: "finalize (落盘切换)",
+}
+
+
+def _format_elapsed(started_at: str) -> str:
+    """从 ISO 8601 started_at 计算「已运行时长」的人类可读字符串。
+
+    解析失败 / 时间为空时返回 ``"未知"``。返回形如 ``"2m 15s"`` / ``"45s"`` / ``"1h 3m"``。
+    """
+    if not started_at:
+        return "未知"
+    try:
+        ts = datetime.fromisoformat(started_at)
+    except (ValueError, TypeError):
+        return "未知"
+    now = datetime.now(timezone.utc)
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    secs = int((now - ts).total_seconds())
+    if secs < 0:
+        secs = 0
+    if secs < 60:
+        return f"{secs}s"
+    if secs < 3600:
+        return f"{secs // 60}m {secs % 60}s"
+    return f"{secs // 3600}h {(secs % 3600) // 60}m"
+
+
+def _stage_state(progress: BuildProgress, stage: BuildStage) -> tuple[str, str, str]:
+    """计算单个阶段的 (状态标记, 进度百分比, 命中/总数) 三元组。
+
+    - 当前阶段（progress.stage）→ ``("run", "<x%>", "<hit>/<total>")``
+    - 当前阶段之前的阶段 → ``("ok", "完成", "")`` 或带计数
+    - 之后的阶段 → ``("pending", "待开始", "")``
+
+    对 extract / vector 两阶段展示细化进度百分比。
+    """
+    current = progress.stage
+    try:
+        current_idx = _STAGE_ORDER.index(current)
+    except ValueError:
+        # DONE / INTERRUPTED：全部阶段视为完成
+        current_idx = len(_STAGE_ORDER)
+    try:
+        stage_idx = _STAGE_ORDER.index(stage)
+    except ValueError:
+        return ("ok", "完成", "")
+
+    if stage_idx < current_idx:
+        # 已完成阶段：附带最终计数（若有）
+        if stage == BuildStage.EXTRACT:
+            total = progress.extract.total
+            hit = progress.extract.completed
+            if total > 0:
+                return ("ok", "完成", f"{hit}/{total} (cached {progress.extract.cached})")
+        if stage == BuildStage.VECTOR:
+            total = progress.vector.total_nodes
+            hit = progress.vector.indexed_nodes
+            if total > 0:
+                return ("ok", "完成", f"{hit}/{total}")
+        return ("ok", "完成", "")
+
+    if stage_idx > current_idx:
+        return ("pending", "待开始", "")
+
+    # 当前阶段：展示细化进度
+    if stage == BuildStage.EXTRACT:
+        total = progress.extract.total
+        hit = progress.extract.completed
+        if total > 0:
+            pct = f"{int(hit * 100 / total)}%"
+            return ("run", pct, f"{hit}/{total} (cached {progress.extract.cached})")
+        return ("run", "进行中", "")
+    if stage == BuildStage.VECTOR:
+        total = progress.vector.total_nodes
+        hit = progress.vector.indexed_nodes
+        if total > 0:
+            pct = f"{int(hit * 100 / total)}%"
+            return ("run", pct, f"{hit}/{total}")
+        return ("run", "进行中", "")
+    return ("run", "进行中", "")
+
+
+def _stage_marker(state: str) -> str:
+    """状态标记 → 显示符号（ok=✓ run=► pending=·）。"""
+    if state == "ok":
+        return "✓"
+    if state == "run":
+        return "►"
+    return "·"
+
+
+def _render_progress_table(progress: BuildProgress, *, terminal: bool) -> Table | list[str]:
+    """渲染阶段化进度表（``rich.Table`` 或纯文本多行字符串）。
+
+    ``terminal=True`` 返回 ``rich.table.Table``（console.print 消费）；
+    ``terminal=False`` 返回 ``list[str]``（每行一条，便于 ``CliRunner`` 捕获断言）。
+    """
+    rows: list[tuple[str, str, str, str, str]] = []  # (marker, stage_label, state_text, pct, hit_total)
+    for stage in _STAGE_ORDER:
+        state, pct, hit_total = _stage_state(progress, stage)
+        rows.append((_stage_marker(state), _STAGE_LABELS[stage], state, pct, hit_total))
+
+    if terminal:
+        table = Table(title=None, show_header=True, header_style="bold cyan", expand=False)
+        table.add_column("状态", style="green", no_wrap=True)
+        table.add_column("阶段", style="white")
+        table.add_column("进度", style="yellow")
+        table.add_column("命中/总数", style="dim")
+        for marker, label, _state, pct, hit_total in rows:
+            color = "green" if marker == "✓" else ("cyan" if marker == "►" else "dim")
+            table.add_row(f"[{color}]{marker}[/{color}]", label, pct, hit_total)
+        return table
+
+    # 非 TTY：纯文本表格（固定列宽对齐，CliRunner 友好）
+    lines = [
+        f"  {marker:<2} {label:<32} {pct:<8} {hit_total}".rstrip()
+        for marker, label, _state, pct, hit_total in rows
+    ]
+    return lines
+
+
+def _render_running_status(progress: BuildProgress, *, terminal: bool) -> None:
+    """场景 1：编译进行中（PID + 已运行时长 + 阶段表 + message）。"""
+    elapsed = _format_elapsed(progress.started_at)
+    pid_text = f"PID {progress.pid}, 已运行 {elapsed}" if progress.pid else f"已运行 {elapsed}"
+    stage_label = _STAGE_LABELS.get(progress.stage, progress.stage.value)
+    header_msg = progress.message or ""
+    stage_line = f"阶段  {stage_label}"
+    if header_msg:
+        stage_line += f" — {header_msg}"
+
+    table = _render_progress_table(progress, terminal=terminal)
+
+    if terminal:
+        assert isinstance(table, Table)
+        panel = Panel(
+            Group(Text(f"编译进行中  ({pid_text})", style="bold cyan"), Text(stage_line), table),
+            title="nanokb 状态",
+            border_style="cyan",
+        )
+        console.print(panel)
+    else:
+        console.print("编译进行中  (" + pid_text + ")")
+        console.print(stage_line)
+        if isinstance(table, list):
+            for line in table:
+                console.print(line)
+
+
+def _render_interrupted_status(progress: BuildProgress, *, terminal: bool) -> None:
+    """场景 3：上次编译中断（中断阶段 + 时间 + 重跑零成本提示）。
+
+    ``BuildProgressWriter.interrupted()`` 把 ``stage`` 覆写为 ``INTERRUPTED``，但
+    ``message`` 字段保留中断前最后一次 ``set_stage`` 的上下文（如「正在抽取 doc.md」）。
+    此处优先展示 message；无 message 时降级展示 ``stage.value``。
+    """
+    if progress.message:
+        stage_text = progress.message
+    elif progress.stage in _STAGE_LABELS:
+        stage_text = _STAGE_LABELS[progress.stage]
+    else:
+        stage_text = progress.stage.value
+    elapsed = _format_elapsed(progress.started_at)
+    lines = [
+        "上次编译中断",
+        f"中断阶段  {stage_text}",
+        f"中断时间  {progress.heartbeat_ts or '未知'}  (已运行 {elapsed})",
+        "提示  中断后重跑零成本：已抽取的 cache 与已索引的向量不丢失，直接 nanokb build 继续。",
+    ]
+    if terminal:
+        panel = Panel(
+            Text("\n".join(lines[1:])),
+            title=lines[0],
+            border_style="yellow",
+        )
+        console.print(panel)
+    else:
+        for line in lines:
+            console.print(line)
+
+
+def _render_zombie_status(progress: BuildProgress, *, terminal: bool) -> None:
+    """场景 4：僵尸进程（heartbeat 超时且无增长）。
+
+    展示最后阶段 + 最后心跳 + 提示（中断的编译，可重跑）。
+    """
+    stage_label = _STAGE_LABELS.get(progress.stage, progress.stage.value)
+    lines = [
+        "检测到中断的编译",
+        f"最后阶段  {stage_label}",
+        f"最后心跳  {progress.heartbeat_ts or '未知'}",
+        "提示  进程疑似已退出（heartbeat 超时且计数无增长），可 nanokb build 重跑（增量/零成本）。",
+    ]
+    if terminal:
+        panel = Panel(
+            Text("\n".join(lines[1:])),
+            title=lines[0],
+            border_style="red",
+        )
+        console.print(panel)
+    else:
+        for line in lines:
+            console.print(line)
+
+
+def _load_manifest_safely(out_dir: Path) -> Manifest | None:
+    """读取 out/manifest.json；不存在 / 损坏返回 None（绝不抛异常阻断 status）。"""
+    path = out_dir / "manifest.json"
+    if not path.exists():
+        return None
+    try:
+        import json
+
+        return Manifest.model_validate(json.loads(path.read_text(encoding="utf-8")))
+    except Exception:
+        logger.debug("failed to parse %s; treating as no manifest", path, exc_info=True)
+        return None
+
+
+def _count_index_stats(out_dir: Path) -> tuple[int, int]:
+    """读取已编译产物中的 community / keyword 计数（best-effort，失败返回 0）。
+
+    从 out/communities.json 与 out/keywords.json 读取（仅纯 JSON，绝不打开 chroma）。
+    """
+    import json
+
+    comm_count = 0
+    kw_count = 0
+    comm_path = out_dir / "communities.json"
+    kw_path = out_dir / "keywords.json"
+    try:
+        if comm_path.exists():
+            data = json.loads(comm_path.read_text(encoding="utf-8"))
+            communities = data.get("communities") if isinstance(data, dict) else data
+            if isinstance(communities, list):
+                comm_count = len(communities)
+    except Exception:
+        logger.debug("failed to parse %s", comm_path, exc_info=True)
+    try:
+        if kw_path.exists():
+            data = json.loads(kw_path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                # keywords.json schema：{ "keywords": {...} } 或直接 dict
+                kws = data.get("keywords", data)
+                if isinstance(kws, dict):
+                    kw_count = len(kws)
+                elif isinstance(kws, list):
+                    kw_count = len(kws)
+    except Exception:
+        logger.debug("failed to parse %s", kw_path, exc_info=True)
+    return comm_count, kw_count
+
+
+def _render_compiled_status(
+    *,
+    doc_count: int,
+    compiled_count: int,
+    manifest: Manifest | None,
+    out_dir: Path,
+    terminal: bool,
+) -> None:
+    """场景 2：已编译（静态：文档数 + 已编译数 + 向量数 + 模型 + 索引统计）。"""
+    if manifest is not None:
+        vectors = manifest.total_vectors
+        last_llm = manifest.last_llm_model or "N/A"
+        last_embed = manifest.last_embedding_model or "N/A"
+        compiled_at = manifest.last_compiled_at or "N/A"
+    else:
+        vectors = 0
+        last_llm = "N/A"
+        last_embed = "N/A"
+        compiled_at = "N/A"
+
+    comm_count, kw_count = _count_index_stats(out_dir)
+    vectors_text = str(vectors) if vectors > 0 else "N/A"
+
+    lines = [
+        f"已编译  raw/ {doc_count} 个文档 | out/ 已编译 {compiled_count} 个",
+        f"向量数  {vectors_text}",
+        f"模型    LLM={last_llm} | Embedding={last_embed}",
+        f"索引    社区 {comm_count} 个 | 关键词 {kw_count} 个",
+        f"编译时间  {compiled_at}",
+    ]
+    if terminal:
+        panel = Panel(
+            Text("\n".join(lines[1:])),
+            title=lines[0],
+            border_style="green",
+        )
+        console.print(panel)
+    else:
+        for line in lines:
+            console.print(line)
+
+
+def _check_liveliness_with_spinner(
+    out_dir: Path,
+    *,
+    recheck_sec: float,
+    terminal: bool,
+) -> bool:
+    """包裹 check_liveliness：TTY 下先显示 spinner 再 sleep；非 TTY 直接 sleep。
+
+    round 3 Opt#3：疑似僵尸场景（heartbeat 过期）进入 check_liveliness 时，TTY 显示
+    ``「正在复核进程存活…（约 Ns）」`` spinner 改善体感；非 TTY（测试 / 重定向）跳过
+    spinner 文案仅 sleep（AC4.5 CliRunner 兼容）。
+    """
+    if not terminal:
+        # 非 TTY：直接调用 check_liveliness（内部 sleep recheck_sec），不输出 spinner 文案
+        return check_liveliness(out_dir, recheck_sec=recheck_sec)
+
+    # TTY：spinner 展示「正在复核…」，内部仍走 check_liveliness 的 sleep + 二次采样
+    message = f"正在复核进程存活…（约 {int(recheck_sec)}s）"
+    result_box: list[bool] = [False]
+    with console.status(message, spinner="dots"):
+        result_box[0] = check_liveliness(out_dir, recheck_sec=recheck_sec)
+    return result_box[0]
 
 
 class RichProgressReporter:
@@ -304,20 +656,77 @@ def search(
 
 @app.command()
 def status() -> None:
-    """显示知识库编译状态（raw/ 文档数 + out/ 是否已编译）。"""
+    """显示知识库编译状态（方案 §7，Feature s3-feat-005）。
+
+    数据来源优先级（§7.1）：
+    1. 运行期优先：``out/.build_progress.json``（feat-004 产出，跨进程可见）。
+    2. 静态兜底：``out/manifest.json`` + ``out/graph.json``（向后兼容，AC4.4）。
+
+    四种场景输出（§7.2）：
+    - 编译进行中（heartbeat fresh 或计数增长）→ 阶段化进度表 + PID/已运行时长。
+    - 已编译（无进度文件，静态产物）→ 文档数/向量数/模型/索引统计。
+    - 上次中断（stage=INTERRUPTED）→ 中断阶段 + 重跑零成本提示。
+    - 僵尸进程（heartbeat 超时且无增长）→ 检测到中断的编译 + 静态产物。
+
+    **status 绝不打开 chroma**（AC3.4 / Medium #3）：向量数从 progress 或 manifest 读，
+    不从 chroma 读。TTY 彩色 Panel/Table + spinner；非 TTY 纯文本（AC4.5 CliRunner 兼容）。
+    """
     settings = _load_settings()
     raw_dir = settings.raw_dir
     out_dir = settings.out_dir
 
     doc_count = _count_documents(raw_dir)
-    graph_path = out_dir / "graph.json"
-    compiled = graph_path.exists()
+    graph_compiled = (out_dir / "graph.json").exists()
+    terminal = console.is_terminal
 
-    if doc_count == 0 and not compiled:
+    # ── 运行期分支：优先读 .build_progress.json ──────────────────────
+    progress = read_progress(out_dir)
+    if progress is not None:
+        # 场景 3：上次中断（stage=INTERRUPTED，文件保留供诊断）
+        if progress.stage == BuildStage.INTERRUPTED:
+            _render_interrupted_status(progress, terminal=terminal)
+            return
+
+        # 场景 1：编译进行中（is_alive = heartbeat fresh）
+        if is_alive(progress):
+            _render_running_status(progress, terminal=terminal)
+            return
+
+        # heartbeat 过期 → 进入 check_liveliness 次级判据（Medium #1 / Opt#3）。
+        # TTY 下先显示 spinner「正在复核进程存活…」再 sleep；非 TTY 直接 sleep。
+        recheck_sec = float(settings.progress_liveliness_recheck_sec or PROGRESS_LIVENESS_RECHECK_SEC)
+        if _check_liveliness_with_spinner(out_dir, recheck_sec=recheck_sec, terminal=terminal):
+            # Medium #1：计数增长 → 仍判「编译进行中」（不误报僵尸）
+            refreshed = read_progress(out_dir) or progress
+            _render_running_status(refreshed, terminal=terminal)
+            return
+
+        # 场景 4：僵尸进程（heartbeat 超时且无增长）
+        _render_zombie_status(progress, terminal=terminal)
+        return
+
+    # ── 静态分支：无运行期进度文件（向后兼容 AC4.4）──────────────────
+    manifest = _load_manifest_safely(out_dir)
+    compiled_count = len(manifest.files) if manifest is not None else 0
+
+    # 空状态：raw/ 无文档且 out/ 未编译（与改造前一致）
+    if doc_count == 0 and not graph_compiled and compiled_count == 0:
         console.print(f"[yellow]raw/ 下 {doc_count} 个文档，out/ 未编译[/yellow]")
-        raise typer.Exit(code=0)
+        return
 
-    state = "已编译" if compiled else "未编译"
+    if graph_compiled or compiled_count > 0:
+        # 场景 2：已编译（静态）
+        _render_compiled_status(
+            doc_count=doc_count,
+            compiled_count=compiled_count,
+            manifest=manifest,
+            out_dir=out_dir,
+            terminal=terminal,
+        )
+        return
+
+    # 有 raw/ 文档但未编译
+    state = "已编译" if graph_compiled else "未编译"
     console.print(f"raw/ 下 {doc_count} 个文档 | out/ {state}")
 
 

@@ -495,6 +495,9 @@ def compile(  # noqa: A001  — 故意与内建同名，方案 §3.5.1 指定
         # round 2 Severe #1 + round 3 Opt#4：构造 EmbeddingCache（cache 与并发正交，
         # Medium #4——enable_embed_cache=False 时仍构造，get/put 为 no-op，embed_batch
         # 仍提供串行/并发 embed），把 cache.embed_batch 作为 embed_fn 注入 index_nodes。
+        # Feature s3-feat-005：total_vector_nodes 在 if 块外初始化，确保下方 manifest
+        # 字段写入时变量必定存在（vector_store 为 None 时为 0）。
+        total_vector_nodes = 0
         if vector_store is not None:
             writer.set_stage(BuildStage.VECTOR)
             logger.info(
@@ -513,7 +516,6 @@ def compile(  # noqa: A001  — 故意与内建同名，方案 §3.5.1 指定
             # Feature s3-feat-004：预计算待索引节点总数（跨子图汇总）写入 vector.total_nodes，
             # 每子图索引后 update_vector(indexed_delta=...) 推进进度。
             subgraphs_to_index: list[tuple[str, nx.MultiDiGraph]] = []
-            total_vector_nodes = 0
             for path in to_process:
                 if path not in results_map:
                     continue
@@ -547,6 +549,15 @@ def compile(  # noqa: A001  — 故意与内建同名，方案 §3.5.1 指定
                 index_config=index_config_signature(settings),
                 embedding_config=embedding_config_signature(settings),
             )
+
+        # Feature s3-feat-005：Manifest 顶层 2.x 增量字段（status 静态展示用）。
+        # total_vectors 取 step 7 跨子图汇总的节点数（vector_store 为 None 时为 0）；
+        # last_compiled_at / last_llm_model / last_embedding_model 记录本次编译身份。
+        # 写在 staging_swap 之前确保原子切换后 out/manifest.json 携带这些字段。
+        manifest.total_vectors = total_vector_nodes
+        manifest.last_compiled_at = now
+        manifest.last_llm_model = settings.llm_model
+        manifest.last_embedding_model = settings.embedding_model
 
         # step 10-11: 序列化到 staging + 原子切换（manifest 最后写）
         logger.info(

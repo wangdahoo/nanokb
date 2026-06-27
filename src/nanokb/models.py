@@ -100,10 +100,23 @@ class FileState(BaseModel):
 
 
 class Manifest(BaseModel):
-    """增量哈希清单 —— staging 原子切换最后写入的文件。"""
+    """增量哈希清单 —— staging 原子切换最后写入的文件。
+
+    round 3（Opt#3 保守变体）：顶层新增 ``total_vectors`` / ``last_compiled_at`` /
+    ``last_llm_model`` / ``last_embedding_model`` 四个可选字段（默认值空/0）。
+    ``version`` 保持 ``"2"`` 不变——新字段视为「2.x 增量」，Pydantic 可选字段 +
+    默认值保证旧 manifest 反序列化不报错（读到默认值时 status 显示「N/A」）。
+    这些字段供 ``nanokb status`` 在无运行期进度文件时展示编译统计（向量数 / 模型
+    身份），**status 绝不打开 chroma**（保守假设规避跨进程锁，Medium #3 / AC3.4）。
+    """
 
     version: str = "2"
     files: dict[str, FileState] = Field(default_factory=dict)
+    # 2.x 增量字段（status 静态展示用；旧 manifest 读默认值显示「N/A」）
+    total_vectors: int = 0
+    last_compiled_at: str = ""
+    last_llm_model: str = ""
+    last_embedding_model: str = ""
 
 
 class RetrievalHit(BaseModel):
