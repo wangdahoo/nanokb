@@ -90,5 +90,11 @@ markers = [
 ]
 addopts = "-ra"
 
+# chromadb 0.5.x 内部访问 model_fields 实例属性，pydantic 2.11 已弃用（上游已修）。
+# 升级 chromadb 到 0.6+ 后移除此过滤。
+filterwarnings = [
+    "ignore::pydantic.PydanticDeprecatedSince211",
+]
+
 [tool.uv]
 default-groups = ["dev"]

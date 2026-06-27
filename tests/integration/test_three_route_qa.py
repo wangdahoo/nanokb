@@ -192,15 +192,18 @@ def test_ask_uses_only_vector_route(tmp_path: Path) -> None:
     assert len(llm.calls) == 1
 
 
-def test_ask_without_chroma_returns_no_results(tmp_path: Path) -> None:
-    """AC #2 边界：ask 模式下 ChromaDB 不存在 → 空召回 → 未找到。"""
-    settings = _build_full_kb(tmp_path)
-    # 删除 chroma 目录模拟未构建向量库
-    chroma = settings.out_dir / "chroma"
-    if chroma.exists():
-        import shutil
+def test_ask_without_chroma_returns_no_results(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC #2 边界：ask 模式下向量库不可用 → 空召回 → 未找到。
 
-        shutil.rmtree(chroma)
+    不物理删除 chroma 目录：chromadb 的 PersistentClient 经 SharedSystemClient
+    全局缓存持有 sqlite 句柄，Windows 下 shutil.rmtree 会触发 WinError 32。
+    改为 patch ``_ensure_vector_store`` 返回 None，精确模拟"向量库不可用"
+    降级路径（与 chroma 目录缺失走同一 ``return None`` 分支）。
+    """
+    settings = _build_full_kb(tmp_path)
+    monkeypatch.setattr(pipeline, "_ensure_vector_store", lambda *args, **kwargs: None)
 
     llm = FakeLLMClient(responses=["answer"])
     result = pipeline.answer_query(settings, "q", mode="ask", llm=llm)
