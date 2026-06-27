@@ -188,6 +188,23 @@ class EmbeddingCache:
         ]
         concurrency = self._embed_concurrency
         done = 0
+        total_batches = len(batches)
+        log_every = max(1, total_batches // 20)
+
+        logger.info(
+            "embed_batch: %d texts (%d unique after dedup, %d batches, concurrency=%d)",
+            len(texts), len(unique_miss), total_batches, concurrency,
+            extra={"stage": "compile-vector"},
+        )
+
+        def _log_progress(batches_done: int) -> None:
+            """按 ~5% 步进打印 embed 进度（大批量不刷屏，末批必报）。"""
+            if batches_done % log_every == 0 or batches_done == total_batches:
+                logger.info(
+                    "embed_batch: %d/%d texts (%d/%d batches)",
+                    done, len(unique_miss), batches_done, total_batches,
+                    extra={"stage": "compile-vector"},
+                )
 
         def _do_one(start: int, batch: list[str]) -> int:
             """单个 batch：embed → 长度校验 → 写回 cache + dedup_map。"""
@@ -212,8 +229,9 @@ class EmbeddingCache:
         #    或并发分支（concurrency>1，阶段二 feat-003：ThreadPoolExecutor +
         #    as_completed + 失败安全取消未决 future，Medium #2）。
         if concurrency <= 1:
-            for start, batch in batches:
+            for idx, (start, batch) in enumerate(batches, 1):
                 done += _do_one(start, batch)
+                _log_progress(idx)
                 if on_progress:
                     on_progress(done, len(unique_miss))
         else:
@@ -226,8 +244,11 @@ class EmbeddingCache:
                     futures = {
                         pool.submit(_do_one, s, b): (s, b) for s, b in batches
                     }
+                    completed = 0
                     for fut in as_completed(futures):
                         done += fut.result()
+                        completed += 1
+                        _log_progress(completed)
                         if on_progress:
                             on_progress(done, len(unique_miss))
                 except BaseException:
